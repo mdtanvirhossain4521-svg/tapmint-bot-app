@@ -209,6 +209,7 @@ def build_state_payload(cur: sqlite3.Cursor, telegram_id: int) -> dict:
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="bn">
 <head>
+  <script src='//libtl.com/sdk.js' data-zone='12352643' data-sdk='show_12352643'></script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TapMint • Mining, Tasks & Games</title>
