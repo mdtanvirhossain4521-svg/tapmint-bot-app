@@ -1,12 +1,10 @@
 import os
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from database import get_conn, init_db
 
 app = FastAPI(title="TapMint Mini App")
-templates = Jinja2Templates(directory="templates")
 
 # --- লাভ ও রিওয়ার্ড কনফিগারেশন (আপনার অ্যাড রেভিনিউ অনুযায়ী ঠিক করবেন) ---
 BASE_TASK_POINTS = 10          # প্রতি টাস্কে বেস পয়েন্ট
@@ -47,9 +45,9 @@ def startup():
     init_db()
 
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+@app.get("/")
+def home():
+    return FileResponse("templates/index.html")
 
 
 @app.post("/api/auth")
