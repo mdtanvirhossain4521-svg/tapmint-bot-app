@@ -1781,6 +1781,186 @@ HTML_CONTENT = """<!DOCTYPE html>
 </html>"""
 
 
+ADMIN_HTML_CONTENT = """<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TapMint • Private Admin</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0b1120;
+      color: #ffffff;
+      margin: 0;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    .box {
+      max-width: 680px;
+      margin: 0 auto;
+      background: #131e32;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      padding: 16px;
+    }
+    h2 {
+      margin: 0 0 12px 0;
+      font-size: 18px;
+    }
+    .row-flex {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    input {
+      flex: 1;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #fff;
+      font-size: 13px;
+    }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: #10b981;
+      color: #04130e;
+    }
+    .btn-approve {
+      background: #10b981;
+      color: #04130e;
+    }
+    .btn-reject {
+      background: #ef4444;
+      color: #ffffff;
+    }
+    .w-card {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+    .w-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .w-meta {
+      color: #94a3b8;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+    .status-pending { color: #f59e0b; }
+    .status-approved { color: #10b981; }
+    .status-rejected { color: #ef4444; }
+    .msg {
+      font-size: 12px;
+      color: #38bdf8;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Private Withdraw Control</h2>
+    <div class="row-flex">
+      <input id="secretInput" type="password" placeholder="Enter Admin Secret" />
+      <button class="btn-primary" onclick="loadWithdrawals()">Unlock</button>
+    </div>
+    <div class="msg" id="adminMsg">শুধুমাত্র অ্যাডমিন সিক্রেট কী দিয়ে রিকোয়েস্ট দেখা ও প্রসেস করা যাবে।</div>
+    <div id="listContainer"></div>
+  </div>
+
+  <script>
+    function getSecret() {
+      return document.getElementById("secretInput").value.trim();
+    }
+
+    async function loadWithdrawals() {
+      const secret = getSecret();
+      const msg = document.getElementById("adminMsg");
+      const container = document.getElementById("listContainer");
+      if (!secret) {
+        msg.innerText = "আগে Admin Secret দিন।";
+        return;
+      }
+
+      const res = await fetch(`/api/admin/withdrawals?secret=${encodeURIComponent(secret)}`);
+      if (!res.ok) {
+        container.innerHTML = "";
+        msg.innerText = "ভুল Secret বা Unauthorized।";
+        return;
+      }
+
+      const items = await res.json();
+      msg.innerText = `মোট রিকোয়েস্ট: ${items.length} টি`;
+
+      if (!items.length) {
+        container.innerHTML = "<div class='w-meta'>কোনো উইথড্র রিকোয়েস্ট নেই।</div>";
+        return;
+      }
+
+      container.innerHTML = items.map(w => {
+        const stClass = `status-${w.status}`;
+        const actions = w.status === "pending"
+          ? `<div class="row-flex" style="margin-bottom:0;">
+               <button class="btn-approve" onclick="doAction(${w.id}, 'approve')">Approve</button>
+               <button class="btn-reject" onclick="doAction(${w.id}, 'reject')">Reject & Refund</button>
+             </div>`
+          : "";
+        return `
+          <div class="w-card">
+            <div class="w-top">
+              <span>#${w.id} • TG: ${w.telegram_id}</span>
+              <span class="${stClass}">${w.status.toUpperCase()}</span>
+            </div>
+            <div class="w-meta">
+              Method: <b>${w.method}</b> | Account: <b>${w.account_info}</b><br/>
+              Points: <b>${w.points_used} PTS</b> | Amount: <b>৳${w.amount_bdt} BDT</b>
+            </div>
+            ${actions}
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function doAction(withdrawalId, action) {
+      const secret = getSecret();
+      const res = await fetch("/api/admin/withdrawals/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          secret,
+          withdrawal_id: withdrawalId,
+          action
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById("adminMsg").innerText = `#${withdrawalId} -> ${action} সম্পন্ন হয়েছে।`;
+        loadWithdrawals();
+      } else {
+        document.getElementById("adminMsg").innerText = data.detail || "Action ব্যর্থ হয়েছে।";
+      }
+    }
+  </script>
+</body>
+</html>"""
+
+
 class AuthPayload(BaseModel):
     telegram_id: int
     username: str | None = None
@@ -1838,6 +2018,11 @@ def startup():
 @app.get("/", response_class=HTMLResponse)
 def home():
     return HTMLResponse(content=HTML_CONTENT)
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_panel():
+    return HTMLResponse(content=ADMIN_HTML_CONTENT)
 
 
 @app.post("/api/auth")
