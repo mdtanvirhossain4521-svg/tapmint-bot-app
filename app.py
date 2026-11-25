@@ -242,7 +242,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       justify-content: space-between;
       padding: 14px 16px;
       border-bottom: 1px solid var(--border-color);
-      background: rgba(11, 17, 32, 0.9);
+      background: rgba(11, 17, 32, 0.92);
       backdrop-filter: blur(10px);
       position: sticky;
       top: 0;
@@ -384,8 +384,8 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     .session-grid {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 6px;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
       margin-bottom: 14px;
     }
     .session-card {
@@ -401,7 +401,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       background: rgba(16, 185, 129, 0.14);
     }
     .session-card-title {
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 700;
     }
     .session-card-sub {
@@ -484,123 +484,164 @@ HTML_CONTENT = """<!DOCTYPE html>
       gap: 8px;
       margin-top: 8px;
     }
-    /* Games Arena */
-    .game-arena {
-      background: #0c1628;
-      border: 1px solid #26354d;
-      border-radius: 14px;
-      padding: 12px;
-      margin-top: 10px;
+
+    /* Fullscreen Game Stage */
+    .fullscreen-stage {
+      position: fixed;
+      inset: 0;
+      background: #070d19;
+      z-index: 250;
+      display: none;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 14px;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .fullscreen-stage.active {
+      display: flex;
+    }
+    .fs-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #1e293b;
+    }
+    .fs-title {
+      font-size: 16px;
+      font-weight: 800;
+    }
+    .fs-close-btn {
+      background: #1e293b;
+      color: #ffffff;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
     }
     .game-hud {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 12px;
+      font-size: 13px;
       color: var(--accent);
       font-weight: 700;
-      margin-bottom: 8px;
-    }
-    .catch-canvas {
-      position: relative;
-      width: 100%;
-      height: 220px;
-      background: #080f1c;
+      background: #101b2e;
       border: 1px solid #1e293b;
       border-radius: 10px;
+      padding: 10px 12px;
+      margin: 10px 0;
+    }
+    .catch-canvas-fs {
+      position: relative;
+      width: 100%;
+      flex: 1;
+      min-height: 340px;
+      background: #050a14;
+      border: 1px solid #26354d;
+      border-radius: 14px;
       overflow: hidden;
       touch-action: none;
     }
     .catch-item {
       position: absolute;
-      width: 28px;
-      height: 28px;
+      width: 34px;
+      height: 34px;
       border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 13px;
+      font-size: 15px;
       font-weight: 800;
       transform: translate(-50%, -50%);
     }
     .catch-coin {
       background: rgba(16, 185, 129, 0.25);
-      border: 1.5px solid var(--primary);
+      border: 2px solid var(--primary);
       color: var(--primary);
     }
     .catch-bomb {
       background: rgba(239, 68, 68, 0.25);
-      border: 1.5px solid var(--danger);
+      border: 2px solid var(--danger);
       color: #fca5a5;
     }
     .catch-basket {
       position: absolute;
-      bottom: 8px;
-      width: 64px;
-      height: 16px;
+      bottom: 12px;
+      width: 78px;
+      height: 20px;
       background: linear-gradient(90deg, var(--primary), var(--accent));
       border-radius: 999px;
       transform: translateX(-50%);
       left: 50%;
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.45);
     }
-    .merge-grid {
+    .merge-grid-fs {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin: 8px 0;
+      gap: 10px;
+      max-width: 360px;
+      width: 100%;
+      margin: 6px auto;
     }
-    .merge-tile {
-      height: 58px;
+    .merge-tile-fs {
+      height: 82px;
       background: #132036;
       border: 1px solid #253652;
-      border-radius: 10px;
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 18px;
+      font-size: 24px;
       font-weight: 800;
       color: #e2e8f0;
     }
-    .merge-tile.val-2 { background: #16324f; color: #7dd3fc; }
-    .merge-tile.val-4 { background: #143d48; color: #5eead4; }
-    .merge-tile.val-8 { background: #124838; color: #34d399; }
-    .merge-tile.val-16 { background: #1e4b2b; color: #a7f3d0; }
-    .merge-tile.val-32, .merge-tile.val-64, .merge-tile.val-128 {
+    .merge-tile-fs.val-2 { background: #16324f; color: #7dd3fc; }
+    .merge-tile-fs.val-4 { background: #143d48; color: #5eead4; }
+    .merge-tile-fs.val-8 { background: #124838; color: #34d399; }
+    .merge-tile-fs.val-16 { background: #1e4b2b; color: #a7f3d0; }
+    .merge-tile-fs.val-32, .merge-tile-fs.val-64, .merge-tile-fs.val-128 {
       background: #059669;
       color: #ffffff;
     }
-    .dpad {
+    .dpad-fs {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      max-width: 190px;
-      margin: 8px auto 0 auto;
+      gap: 8px;
+      max-width: 240px;
+      width: 100%;
+      margin: 10px auto 4px auto;
     }
     .dpad-btn {
       background: #1e293b;
       color: #fff;
       border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 8px;
-      font-size: 13px;
+      border-radius: 10px;
+      padding: 12px 8px;
+      font-size: 15px;
       font-weight: 700;
       cursor: pointer;
     }
-    .snake-grid {
+    .snake-grid-fs {
       display: grid;
       grid-template-columns: repeat(9, 1fr);
-      gap: 2px;
-      background: #080f1c;
-      border: 1px solid #1e293b;
-      border-radius: 10px;
-      padding: 6px;
-      margin: 8px auto;
-      max-width: 270px;
+      gap: 3px;
+      background: #050a14;
+      border: 1px solid #26354d;
+      border-radius: 12px;
+      padding: 8px;
+      margin: 6px auto;
+      max-width: 340px;
+      width: 100%;
+      box-sizing: border-box;
     }
     .snake-cell {
       aspect-ratio: 1 / 1;
       background: #101b2e;
-      border-radius: 3px;
+      border-radius: 4px;
     }
     .snake-cell.body {
       background: var(--primary);
@@ -784,38 +825,33 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- === TASKS TAB (Sessions 01-04 + Games Session + Quiz + Mystery Box) === -->
+    <!-- === TASKS TAB (Sessions 01-04 + Quiz + Mystery Box) === -->
     <div id="tab-tasks" class="tab-content">
       <div style="margin-bottom: 10px;">
-        <h3 style="margin: 0 0 3px 0; font-size: 16px;">Sessions & Games</h3>
-        <p style="margin: 0; font-size: 12px; color: var(--text-muted);">সেশন ১–৪ এর কাজ অথবা আলাদা Games সেশন খেলুন</p>
+        <h3 style="margin: 0 0 3px 0; font-size: 16px;">Daily Sessions</h3>
+        <p style="margin: 0; font-size: 12px; color: var(--text-muted);">সেশন ১–৪ এর কাজ শেষ করুন এবং কুইজ/বক্স নিন</p>
       </div>
 
       <div class="session-grid">
         <div class="session-card active" id="sc-session_1" onclick="selectSession('session_1')">
-          <div class="session-card-title">Sess 01</div>
+          <div class="session-card-title">Session 01</div>
           <div class="session-card-sub" id="sc-sub-session_1">0/5</div>
         </div>
         <div class="session-card" id="sc-session_2" onclick="selectSession('session_2')">
-          <div class="session-card-title">Sess 02</div>
+          <div class="session-card-title">Session 02</div>
           <div class="session-card-sub" id="sc-sub-session_2">0/5</div>
         </div>
         <div class="session-card" id="sc-session_3" onclick="selectSession('session_3')">
-          <div class="session-card-title">Sess 03</div>
+          <div class="session-card-title">Session 03</div>
           <div class="session-card-sub" id="sc-sub-session_3">0/5</div>
         </div>
         <div class="session-card" id="sc-session_4" onclick="selectSession('session_4')">
-          <div class="session-card-title">Sess 04</div>
+          <div class="session-card-title">Session 04</div>
           <div class="session-card-sub" id="sc-sub-session_4">0/5</div>
-        </div>
-        <div class="session-card" id="sc-games" onclick="selectSession('games')">
-          <div class="session-card-title">Games</div>
-          <div class="session-card-sub" id="sc-sub-games">0/3</div>
         </div>
       </div>
 
-      <!-- Task Sessions 1-4 -->
-      <div class="card" id="task-session-panel">
+      <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
           <h4 style="margin: 0; font-size: 14px;" id="active-session-heading">Session 01 Missions</h4>
           <button class="action-btn" id="btn-session-bonus" onclick="claimSessionBonus()">Bonus (+25)</button>
@@ -823,89 +859,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div id="session-tasks-container"></div>
       </div>
 
-      <!-- Separate Games Session -->
-      <div id="games-session-panel" style="display: none;">
-        <!-- Game 1: Catch & Dodge -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <h4 style="margin: 0; font-size: 14px;">Catch & Dodge</h4>
-              <div style="font-size: 11px; color: var(--text-muted);">কয়েন (+) ধরুন, লাল বোম (✕) এড়ান • লক্ষ্য: ৬ স্কোর (+10 PTS)</div>
-            </div>
-            <button class="action-btn" id="btn-start-catch" onclick="startCatchGame()">Play</button>
-          </div>
-          <div class="game-arena">
-            <div class="game-hud">
-              <span>Score: <span id="catch-score">0</span></span>
-              <span>Time: <span id="catch-time">20s</span></span>
-              <span id="catch-reward-badge">Reward: +10 PTS</span>
-            </div>
-            <div class="catch-canvas" id="catch-canvas" ontouchmove="moveBasketTouch(event)" onmousemove="moveBasketMouse(event)">
-              <div class="catch-basket" id="catch-basket"></div>
-            </div>
-            <div style="display: flex; gap: 8px; margin-top: 8px;">
-              <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(-28)">◀ Left</button>
-              <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(28)">Right ▶</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Game 2: Number Merge 2048 -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <h4 style="margin: 0; font-size: 14px;">Number Merge 2048</h4>
-              <div style="font-size: 11px; color: var(--text-muted);">একই নম্বর মার্জ করে ৩২+ টাইল বা ৪০ স্কোর করুন (+12 PTS)</div>
-            </div>
-            <button class="action-btn" id="btn-start-merge" onclick="initMergeGame()">Reset</button>
-          </div>
-          <div class="game-arena">
-            <div class="game-hud">
-              <span>Merge Score: <span id="merge-score">0</span></span>
-              <span>Max Tile: <span id="merge-max">2</span></span>
-              <span id="merge-reward-badge">Reward: +12 PTS</span>
-            </div>
-            <div class="merge-grid" id="merge-grid"></div>
-            <div class="dpad">
-              <div></div>
-              <button class="dpad-btn" onclick="moveMerge('up')">▲</button>
-              <div></div>
-              <button class="dpad-btn" onclick="moveMerge('left')">◀</button>
-              <button class="dpad-btn" onclick="moveMerge('down')">▼</button>
-              <button class="dpad-btn" onclick="moveMerge('right')">▶</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Game 3: Snake -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <h4 style="margin: 0; font-size: 14px;">Snake Arcade</h4>
-              <div style="font-size: 11px; color: var(--text-muted);">খাবার খেয়ে ৫ স্কোর করুন, দেয়াল ও নিজের শরীর বাঁচান (+12 PTS)</div>
-            </div>
-            <button class="action-btn" id="btn-start-snake" onclick="startSnakeGame()">Start</button>
-          </div>
-          <div class="game-arena">
-            <div class="game-hud">
-              <span>Snake Score: <span id="snake-score">0</span></span>
-              <span id="snake-status-hud">Ready</span>
-              <span id="snake-reward-badge">Reward: +12 PTS</span>
-            </div>
-            <div class="snake-grid" id="snake-grid"></div>
-            <div class="dpad">
-              <div></div>
-              <button class="dpad-btn" onclick="setSnakeDir(0, -1)">▲</button>
-              <div></div>
-              <button class="dpad-btn" onclick="setSnakeDir(-1, 0)">◀</button>
-              <button class="dpad-btn" onclick="setSnakeDir(0, 1)">▼</button>
-              <button class="dpad-btn" onclick="setSnakeDir(1, 0)">▶</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Quick Quiz -->
       <div class="card">
         <h4 style="margin: 0 0 6px 0; font-size: 14px;">Quick Quiz (+10 PTS Base)</h4>
         <div style="font-size: 12px; color: var(--text-muted);">প্রশ্ন: ১০ পয়েন্ট সমান কত বাংলাদেশী টাকা?</div>
@@ -916,7 +869,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div style="font-size: 11px; color: var(--primary); margin-top: 6px;" id="quiz-status"></div>
       </div>
 
-      <!-- Mystery Box -->
       <div class="card">
         <h4 style="margin: 0 0 4px 0; font-size: 14px;">Mystery Box (Up to +15 PTS Base)</h4>
         <div style="font-size: 12px; color: var(--text-muted);">আজকের জন্য একটি বক্স বেছে নিন:</div>
@@ -926,6 +878,43 @@ HTML_CONTENT = """<!DOCTYPE html>
           <div class="box-choice" onclick="openMysteryBox(3)">🎁 Box 3</div>
         </div>
         <div style="font-size: 11px; color: var(--primary); margin-top: 8px;" id="box-status"></div>
+      </div>
+    </div>
+
+    <!-- === SEPARATE GAMES TAB === -->
+    <div id="tab-games" class="tab-content">
+      <div style="margin-bottom: 10px;">
+        <h3 style="margin: 0 0 3px 0; font-size: 16px;">Games Arena</h3>
+        <p style="margin: 0; font-size: 12px; color: var(--text-muted);">ফুল-স্ক্রিনে খেলার জন্য যেকোনো গেমে Play চাপুন</p>
+      </div>
+
+      <div class="card">
+        <div class="task-item" style="margin-bottom: 10px;">
+          <div class="task-info">
+            <span class="task-title">Catch & Dodge</span>
+            <span class="task-sub">কয়েন (+) ধরুন, বোম (✕) এড়ান • লক্ষ্য: ৬ স্কোর</span>
+            <span class="task-reward" id="lobby-catch-status">Reward: +10 PTS</span>
+          </div>
+          <button class="action-btn" onclick="openFullscreenGame('catch')">Play Fullscreen</button>
+        </div>
+
+        <div class="task-item" style="margin-bottom: 10px;">
+          <div class="task-info">
+            <span class="task-title">Number Merge 2048</span>
+            <span class="task-sub">নম্বর মার্জ করে ৩২+ টাইল বা ৪০ স্কোর করুন</span>
+            <span class="task-reward" id="lobby-merge-status">Reward: +12 PTS</span>
+          </div>
+          <button class="action-btn" onclick="openFullscreenGame('merge')">Play Fullscreen</button>
+        </div>
+
+        <div class="task-item" style="margin-bottom: 0;">
+          <div class="task-info">
+            <span class="task-title">Snake Arcade</span>
+            <span class="task-sub">খাবার খেয়ে ৫ স্কোর করুন, দেয়াল ও লেজ বাঁচান</span>
+            <span class="task-reward" id="lobby-snake-status">Reward: +12 PTS</span>
+          </div>
+          <button class="action-btn" onclick="openFullscreenGame('snake')">Play Fullscreen</button>
+        </div>
       </div>
     </div>
 
@@ -1010,7 +999,67 @@ HTML_CONTENT = """<!DOCTYPE html>
 
   </div>
 
-  <!-- === BOTTOM NAVIGATION === -->
+  <!-- === FULLSCREEN GAME STAGE === -->
+  <div id="fs-stage" class="fullscreen-stage">
+    <div class="fs-topbar">
+      <div class="fs-title" id="fs-game-title">Game</div>
+      <button class="fs-close-btn" onclick="closeFullscreenGame()">✕ Exit</button>
+    </div>
+
+    <!-- Fullscreen Catch & Dodge -->
+    <div id="fs-view-catch" style="display: none; flex: 1; flex-direction: column;">
+      <div class="game-hud">
+        <span>Score: <span id="catch-score">0</span></span>
+        <span>Time: <span id="catch-time">20s</span></span>
+        <button class="action-btn" onclick="startCatchGame()">Restart</button>
+      </div>
+      <div class="catch-canvas-fs" id="catch-canvas" ontouchmove="moveBasketTouch(event)" onmousemove="moveBasketMouse(event)">
+        <div class="catch-basket" id="catch-basket"></div>
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(-36)">◀ Left</button>
+        <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(36)">Right ▶</button>
+      </div>
+    </div>
+
+    <!-- Fullscreen Number Merge 2048 -->
+    <div id="fs-view-merge" style="display: none; flex: 1; flex-direction: column; justify-content: center;">
+      <div class="game-hud">
+        <span>Score: <span id="merge-score">0</span></span>
+        <span>Max Tile: <span id="merge-max">2</span></span>
+        <button class="action-btn" onclick="initMergeGame()">Reset</button>
+      </div>
+      <div class="merge-grid-fs" id="merge-grid"></div>
+      <div class="dpad-fs">
+        <div></div>
+        <button class="dpad-btn" onclick="moveMerge('up')">▲</button>
+        <div></div>
+        <button class="dpad-btn" onclick="moveMerge('left')">◀</button>
+        <button class="dpad-btn" onclick="moveMerge('down')">▼</button>
+        <button class="dpad-btn" onclick="moveMerge('right')">▶</button>
+      </div>
+    </div>
+
+    <!-- Fullscreen Snake -->
+    <div id="fs-view-snake" style="display: none; flex: 1; flex-direction: column; justify-content: center;">
+      <div class="game-hud">
+        <span>Score: <span id="snake-score">0</span></span>
+        <span id="snake-status-hud">Ready</span>
+        <button class="action-btn" onclick="startSnakeGame()">Start</button>
+      </div>
+      <div class="snake-grid-fs" id="snake-grid"></div>
+      <div class="dpad-fs">
+        <div></div>
+        <button class="dpad-btn" onclick="setSnakeDir(0, -1)">▲</button>
+        <div></div>
+        <button class="dpad-btn" onclick="setSnakeDir(-1, 0)">◀</button>
+        <button class="dpad-btn" onclick="setSnakeDir(0, 1)">▼</button>
+        <button class="dpad-btn" onclick="setSnakeDir(1, 0)">▶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- === BOTTOM NAVIGATION (Tasks + Games side by side) === -->
   <div class="nav-bar">
     <div class="nav-item active" id="nav-home" onclick="switchTab('home')">
       <span class="nav-icon">🏠</span>
@@ -1019,6 +1068,10 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="nav-item" id="nav-tasks" onclick="switchTab('tasks')">
       <span class="nav-icon">📋</span>
       <span>Tasks</span>
+    </div>
+    <div class="nav-item" id="nav-games" onclick="switchTab('games')">
+      <span class="nav-icon">🎮</span>
+      <span>Games</span>
     </div>
     <div class="nav-item" id="nav-refer" onclick="switchTab('refer')">
       <span class="nav-icon">👥</span>
@@ -1104,13 +1157,36 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function selectSession(sessKey) {
       currentSession = sessKey;
-      ["session_1", "session_2", "session_3", "session_4", "games"].forEach(k => {
+      ["session_1", "session_2", "session_3", "session_4"].forEach(k => {
         document.getElementById(`sc-${k}`).classList.toggle("active", k === sessKey);
       });
-      const isGames = sessKey === "games";
-      document.getElementById("task-session-panel").style.display = isGames ? "none" : "block";
-      document.getElementById("games-session-panel").style.display = isGames ? "block" : "none";
-      if (!isGames) renderSessionTasks();
+      renderSessionTasks();
+    }
+
+    function openFullscreenGame(gameType) {
+      document.getElementById("fs-stage").classList.add("active");
+      document.getElementById("fs-view-catch").style.display = gameType === "catch" ? "flex" : "none";
+      document.getElementById("fs-view-merge").style.display = gameType === "merge" ? "flex" : "none";
+      document.getElementById("fs-view-snake").style.display = gameType === "snake" ? "flex" : "none";
+
+      if (gameType === "catch") {
+        document.getElementById("fs-game-title").innerText = "Catch & Dodge";
+        startCatchGame();
+      } else if (gameType === "merge") {
+        document.getElementById("fs-game-title").innerText = "Number Merge 2048";
+        initMergeGame();
+      } else if (gameType === "snake") {
+        document.getElementById("fs-game-title").innerText = "Snake Arcade";
+        renderSnakeGrid();
+      }
+    }
+
+    function closeFullscreenGame() {
+      catchRunning = false;
+      clearInterval(catchTimerId);
+      clearInterval(catchCountdownId);
+      clearInterval(snakeLoopId);
+      document.getElementById("fs-stage").classList.remove("active");
     }
 
     function selectMethod(method) {
@@ -1142,7 +1218,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     function renderSessionTasks() {
-      if (currentSession === "games") return;
       const container = document.getElementById("session-tasks-container");
       document.getElementById("active-session-heading").innerText = SESSION_DATA[currentSession].label;
 
@@ -1231,15 +1306,14 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
 
       const doneGames = new Set(state.done_games || []);
-      document.getElementById("sc-sub-games").innerText = `${doneGames.size}/3`;
       if (doneGames.has("game_catch_dodge")) {
-        document.getElementById("catch-reward-badge").innerText = "Claimed ✓";
+        document.getElementById("lobby-catch-status").innerText = "Claimed Today ✓";
       }
       if (doneGames.has("game_merge_2048")) {
-        document.getElementById("merge-reward-badge").innerText = "Claimed ✓";
+        document.getElementById("lobby-merge-status").innerText = "Claimed Today ✓";
       }
       if (doneGames.has("game_snake")) {
-        document.getElementById("snake-reward-badge").innerText = "Claimed ✓";
+        document.getElementById("lobby-snake-status").innerText = "Claimed Today ✓";
       }
 
       if (state.quiz_done) {
@@ -1382,7 +1456,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     let catchRunning = false;
     let catchScore = 0;
     let catchTimeLeft = 20;
-    let basketX = 50; // %
+    let basketX = 50;
     let fallingObjs = [];
 
     function setBasketPos(pct) {
@@ -1392,7 +1466,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function nudgeBasket(deltaPx) {
       const canvas = document.getElementById("catch-canvas");
-      const width = canvas.clientWidth || 300;
+      const width = canvas.clientWidth || 320;
       const pctDelta = (deltaPx / width) * 100;
       setBasketPos(basketX + pctDelta);
     }
@@ -1432,7 +1506,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           const obj = {
             x: 12 + Math.random() * 76,
             y: 6,
-            speed: 2.3 + Math.random() * 1.4,
+            speed: 2.2 + Math.random() * 1.4,
             isBomb,
             el: document.createElement("div")
           };
@@ -1448,7 +1522,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           o.el.style.left = `${o.x}%`;
           o.el.style.top = `${o.y}%`;
 
-          const hitBasket = o.y >= 82 && o.y <= 93 && Math.abs(o.x - basketX) <= 14;
+          const hitBasket = o.y >= 84 && o.y <= 94 && Math.abs(o.x - basketX) <= 14;
           if (hitBasket) {
             o.el.remove();
             if (o.isBomb) {
@@ -1521,7 +1595,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         for (let c = 0; c < 3; c++) {
           const v = mergeBoard[r][c];
           if (v > maxVal) maxVal = v;
-          html += `<div class="merge-tile ${v ? "val-" + v : ""}">${v || ""}</div>`;
+          html += `<div class="merge-tile-fs ${v ? "val-" + v : ""}">${v || ""}</div>`;
         }
       }
       grid.innerHTML = html;
