@@ -14,8 +14,14 @@ DAILY_CHECKIN_POINTS = 10        # ডেইলি চেক-ইন বোনা
 MINING_PULSE_POINTS = 5          # মাইনিং পালস বোনাস
 MINING_PULSE_COOLDOWN_SEC = 1800 # ৩০ মিনিট (১৮০০ সেকেন্ড) পরপর মাইনিং পালস
 QUIZ_POINTS = 10                 # কুইজ সঠিক উত্তরে পয়েন্ট
-MYSTERY_BOX_MAX_POINTS = 15      # মিস্ট্রি বক্স সর্বোচ্চ বেস পয়েন্ট (১ থেকে ১৫)
+MYSTERY_BOX_MAX_POINTS = 15      # মিস্ট্রি বক্স সর্বোচ্চ বেস পয়েন্ট
 SESSION_BONUS_POINTS = 25        # একটি সেশনের সব ৫টি লিংক শেষ করলে বোনাস
+
+GAME_REWARD_POINTS = {
+    "game_catch_dodge": 10,
+    "game_merge_2048": 12,
+    "game_snake": 12,
+}
 
 REF_BONUS_PCT = 5                # প্রতি অ্যাক্টিভ রেফারেলে +৫% বোনাস
 MAX_REF_BONUS_PCT = 30           # সর্বোচ্চ রেফারেল বোনাস ৩০%
@@ -185,6 +191,8 @@ def build_state_payload(cur: sqlite3.Cursor, telegram_id: int) -> dict:
             "bonus_claimed": f"session_bonus_{s_key}" in claimed_today,
         }
 
+    done_games = [g for g in GAME_REWARD_POINTS if g in claimed_today]
+
     return {
         "user": dict(user),
         "today_completed_count": len(completed_today_tasks),
@@ -192,8 +200,7 @@ def build_state_payload(cur: sqlite3.Cursor, telegram_id: int) -> dict:
         "daily_checkin_done": "daily_checkin" in claimed_today,
         "quiz_done": "quick_quiz" in claimed_today,
         "mystery_box_done": "mystery_box" in claimed_today,
-        "timing_game_done": "game_timing" in claimed_today,
-        "pattern_game_done": "game_pattern" in claimed_today,
+        "done_games": done_games,
         "pulse_remaining_sec": pulse_remaining_sec,
         "sessions": session_status,
     }
@@ -204,7 +211,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TapMint • Mining, Tasks & Mini Games</title>
+  <title>TapMint • Mining, Tasks & Games</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
@@ -214,6 +221,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       --primary: #10b981;
       --primary-hover: #059669;
       --accent: #38bdf8;
+      --danger: #ef4444;
       --text-white: #ffffff;
       --text-muted: #94a3b8;
       --border-color: #1e293b;
@@ -224,7 +232,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       background: var(--bg-dark);
       color: var(--text-white);
       margin: 0;
-      padding: 0 0 80px 0;
+      padding: 0 0 82px 0;
       box-sizing: border-box;
       user-select: none;
     }
@@ -291,7 +299,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     .balance-label {
       font-size: 12px;
       color: var(--text-muted);
-      letter-spacing: 0.4px;
     }
     .balance-points {
       font-size: 32px;
@@ -377,24 +384,24 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     .session-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
       margin-bottom: 14px;
     }
     .session-card {
       background: var(--card-bg);
       border: 1px solid var(--border-color);
       border-radius: 10px;
-      padding: 8px 6px;
+      padding: 8px 4px;
       text-align: center;
       cursor: pointer;
     }
     .session-card.active {
       border-color: var(--primary);
-      background: rgba(16, 185, 129, 0.12);
+      background: rgba(16, 185, 129, 0.14);
     }
     .session-card-title {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 700;
     }
     .session-card-sub {
@@ -435,7 +442,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       background: var(--primary);
       color: #04130e;
       border: none;
-      padding: 8px 13px;
+      padding: 8px 12px;
       border-radius: 8px;
       font-size: 12px;
       font-weight: 700;
@@ -471,64 +478,139 @@ HTML_CONTENT = """<!DOCTYPE html>
       font-weight: 700;
       cursor: pointer;
     }
-    .box-choice:hover {
-      border-color: var(--primary);
-    }
     .quiz-opts {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
       margin-top: 8px;
     }
-    .timing-track {
-      width: 100%;
-      height: 18px;
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 999px;
-      position: relative;
-      overflow: hidden;
-      margin: 10px 0;
+    /* Games Arena */
+    .game-arena {
+      background: #0c1628;
+      border: 1px solid #26354d;
+      border-radius: 14px;
+      padding: 12px;
+      margin-top: 10px;
     }
-    .timing-zone {
-      position: absolute;
-      left: 38%;
-      width: 24%;
-      top: 0;
-      bottom: 0;
-      background: rgba(16, 185, 129, 0.35);
-      border-left: 1px solid var(--primary);
-      border-right: 1px solid var(--primary);
-    }
-    .timing-marker {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 8px;
-      background: var(--accent);
-      border-radius: 999px;
-      left: 0%;
-    }
-    .pattern-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin: 10px 0;
-    }
-    .pattern-pad {
-      background: var(--card-soft);
-      border: 1px solid #334155;
-      border-radius: 10px;
-      padding: 14px;
-      text-align: center;
+    .game-hud {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--accent);
       font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .catch-canvas {
+      position: relative;
+      width: 100%;
+      height: 220px;
+      background: #080f1c;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      overflow: hidden;
+      touch-action: none;
+    }
+    .catch-item {
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       font-size: 13px;
+      font-weight: 800;
+      transform: translate(-50%, -50%);
+    }
+    .catch-coin {
+      background: rgba(16, 185, 129, 0.25);
+      border: 1.5px solid var(--primary);
+      color: var(--primary);
+    }
+    .catch-bomb {
+      background: rgba(239, 68, 68, 0.25);
+      border: 1.5px solid var(--danger);
+      color: #fca5a5;
+    }
+    .catch-basket {
+      position: absolute;
+      bottom: 8px;
+      width: 64px;
+      height: 16px;
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      border-radius: 999px;
+      transform: translateX(-50%);
+      left: 50%;
+    }
+    .merge-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .merge-tile {
+      height: 58px;
+      background: #132036;
+      border: 1px solid #253652;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 800;
+      color: #e2e8f0;
+    }
+    .merge-tile.val-2 { background: #16324f; color: #7dd3fc; }
+    .merge-tile.val-4 { background: #143d48; color: #5eead4; }
+    .merge-tile.val-8 { background: #124838; color: #34d399; }
+    .merge-tile.val-16 { background: #1e4b2b; color: #a7f3d0; }
+    .merge-tile.val-32, .merge-tile.val-64, .merge-tile.val-128 {
+      background: #059669;
+      color: #ffffff;
+    }
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      max-width: 190px;
+      margin: 8px auto 0 auto;
+    }
+    .dpad-btn {
+      background: #1e293b;
+      color: #fff;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 13px;
+      font-weight: 700;
       cursor: pointer;
     }
-    .pattern-pad.lit {
-      background: rgba(16, 185, 129, 0.3);
-      border-color: var(--primary);
-      color: var(--primary);
+    .snake-grid {
+      display: grid;
+      grid-template-columns: repeat(9, 1fr);
+      gap: 2px;
+      background: #080f1c;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 6px;
+      margin: 8px auto;
+      max-width: 270px;
+    }
+    .snake-cell {
+      aspect-ratio: 1 / 1;
+      background: #101b2e;
+      border-radius: 3px;
+    }
+    .snake-cell.body {
+      background: var(--primary);
+    }
+    .snake-cell.head {
+      background: #6ee7b7;
+    }
+    .snake-cell.food {
+      background: #f59e0b;
+      border-radius: 50%;
     }
     .input-group {
       margin-bottom: 12px;
@@ -679,7 +761,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Daily Check-in & Mining Pulse -->
       <div class="card">
         <h3 style="margin: 0 0 10px 0; font-size: 14px;">Daily Boosters</h3>
 
@@ -703,45 +784,132 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- === TASKS TAB (Sessions + Bonus + Quiz + Box + Smart Games) === -->
+    <!-- === TASKS TAB (Sessions 01-04 + Games Session + Quiz + Mystery Box) === -->
     <div id="tab-tasks" class="tab-content">
       <div style="margin-bottom: 10px;">
-        <h3 style="margin: 0 0 3px 0; font-size: 16px;">Daily Sessions & Challenges</h3>
-        <p style="margin: 0; font-size: 12px; color: var(--text-muted);">সেশন অনুযায়ী টাস্ক শেষ করুন, বোনাস ও স্মার্ট গেম খেলুন</p>
+        <h3 style="margin: 0 0 3px 0; font-size: 16px;">Sessions & Games</h3>
+        <p style="margin: 0; font-size: 12px; color: var(--text-muted);">সেশন ১–৪ এর কাজ অথবা আলাদা Games সেশন খেলুন</p>
       </div>
 
       <div class="session-grid">
         <div class="session-card active" id="sc-session_1" onclick="selectSession('session_1')">
-          <div class="session-card-title">Session 01</div>
+          <div class="session-card-title">Sess 01</div>
           <div class="session-card-sub" id="sc-sub-session_1">0/5</div>
         </div>
         <div class="session-card" id="sc-session_2" onclick="selectSession('session_2')">
-          <div class="session-card-title">Session 02</div>
+          <div class="session-card-title">Sess 02</div>
           <div class="session-card-sub" id="sc-sub-session_2">0/5</div>
         </div>
         <div class="session-card" id="sc-session_3" onclick="selectSession('session_3')">
-          <div class="session-card-title">Session 03</div>
+          <div class="session-card-title">Sess 03</div>
           <div class="session-card-sub" id="sc-sub-session_3">0/5</div>
         </div>
         <div class="session-card" id="sc-session_4" onclick="selectSession('session_4')">
-          <div class="session-card-title">Session 04</div>
+          <div class="session-card-title">Sess 04</div>
           <div class="session-card-sub" id="sc-sub-session_4">0/5</div>
+        </div>
+        <div class="session-card" id="sc-games" onclick="selectSession('games')">
+          <div class="session-card-title">Games</div>
+          <div class="session-card-sub" id="sc-sub-games">0/3</div>
         </div>
       </div>
 
-      <div class="card">
+      <!-- Task Sessions 1-4 -->
+      <div class="card" id="task-session-panel">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
           <h4 style="margin: 0; font-size: 14px;" id="active-session-heading">Session 01 Missions</h4>
-          <button class="action-btn" id="btn-session-bonus" onclick="claimSessionBonus()">Session Bonus (+25)</button>
+          <button class="action-btn" id="btn-session-bonus" onclick="claimSessionBonus()">Bonus (+25)</button>
         </div>
         <div id="session-tasks-container"></div>
+      </div>
+
+      <!-- Separate Games Session -->
+      <div id="games-session-panel" style="display: none;">
+        <!-- Game 1: Catch & Dodge -->
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h4 style="margin: 0; font-size: 14px;">Catch & Dodge</h4>
+              <div style="font-size: 11px; color: var(--text-muted);">কয়েন (+) ধরুন, লাল বোম (✕) এড়ান • লক্ষ্য: ৬ স্কোর (+10 PTS)</div>
+            </div>
+            <button class="action-btn" id="btn-start-catch" onclick="startCatchGame()">Play</button>
+          </div>
+          <div class="game-arena">
+            <div class="game-hud">
+              <span>Score: <span id="catch-score">0</span></span>
+              <span>Time: <span id="catch-time">20s</span></span>
+              <span id="catch-reward-badge">Reward: +10 PTS</span>
+            </div>
+            <div class="catch-canvas" id="catch-canvas" ontouchmove="moveBasketTouch(event)" onmousemove="moveBasketMouse(event)">
+              <div class="catch-basket" id="catch-basket"></div>
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 8px;">
+              <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(-28)">◀ Left</button>
+              <button class="dpad-btn" style="flex: 1;" onclick="nudgeBasket(28)">Right ▶</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Game 2: Number Merge 2048 -->
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h4 style="margin: 0; font-size: 14px;">Number Merge 2048</h4>
+              <div style="font-size: 11px; color: var(--text-muted);">একই নম্বর মার্জ করে ৩২+ টাইল বা ৪০ স্কোর করুন (+12 PTS)</div>
+            </div>
+            <button class="action-btn" id="btn-start-merge" onclick="initMergeGame()">Reset</button>
+          </div>
+          <div class="game-arena">
+            <div class="game-hud">
+              <span>Merge Score: <span id="merge-score">0</span></span>
+              <span>Max Tile: <span id="merge-max">2</span></span>
+              <span id="merge-reward-badge">Reward: +12 PTS</span>
+            </div>
+            <div class="merge-grid" id="merge-grid"></div>
+            <div class="dpad">
+              <div></div>
+              <button class="dpad-btn" onclick="moveMerge('up')">▲</button>
+              <div></div>
+              <button class="dpad-btn" onclick="moveMerge('left')">◀</button>
+              <button class="dpad-btn" onclick="moveMerge('down')">▼</button>
+              <button class="dpad-btn" onclick="moveMerge('right')">▶</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Game 3: Snake -->
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h4 style="margin: 0; font-size: 14px;">Snake Arcade</h4>
+              <div style="font-size: 11px; color: var(--text-muted);">খাবার খেয়ে ৫ স্কোর করুন, দেয়াল ও নিজের শরীর বাঁচান (+12 PTS)</div>
+            </div>
+            <button class="action-btn" id="btn-start-snake" onclick="startSnakeGame()">Start</button>
+          </div>
+          <div class="game-arena">
+            <div class="game-hud">
+              <span>Snake Score: <span id="snake-score">0</span></span>
+              <span id="snake-status-hud">Ready</span>
+              <span id="snake-reward-badge">Reward: +12 PTS</span>
+            </div>
+            <div class="snake-grid" id="snake-grid"></div>
+            <div class="dpad">
+              <div></div>
+              <button class="dpad-btn" onclick="setSnakeDir(0, -1)">▲</button>
+              <div></div>
+              <button class="dpad-btn" onclick="setSnakeDir(-1, 0)">◀</button>
+              <button class="dpad-btn" onclick="setSnakeDir(0, 1)">▼</button>
+              <button class="dpad-btn" onclick="setSnakeDir(1, 0)">▶</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Quick Quiz -->
       <div class="card">
         <h4 style="margin: 0 0 6px 0; font-size: 14px;">Quick Quiz (+10 PTS Base)</h4>
-        <div style="font-size: 12px; color: var(--text-muted);" id="quiz-question">প্রশ্ন: ১০ পয়েন্ট সমান কত বাংলাদেশী টাকা?</div>
-        <div class="quiz-opts" id="quiz-options">
+        <div style="font-size: 12px; color: var(--text-muted);">প্রশ্ন: ১০ পয়েন্ট সমান কত বাংলাদেশী টাকা?</div>
+        <div class="quiz-opts">
           <button class="action-btn" onclick="answerQuiz('1')">১ টাকা</button>
           <button class="action-btn" onclick="answerQuiz('10')">১০ টাকা</button>
         </div>
@@ -752,40 +920,12 @@ HTML_CONTENT = """<!DOCTYPE html>
       <div class="card">
         <h4 style="margin: 0 0 4px 0; font-size: 14px;">Mystery Box (Up to +15 PTS Base)</h4>
         <div style="font-size: 12px; color: var(--text-muted);">আজকের জন্য একটি বক্স বেছে নিন:</div>
-        <div class="box-grid" id="mystery-box-grid">
+        <div class="box-grid">
           <div class="box-choice" onclick="openMysteryBox(1)">🎁 Box 1</div>
           <div class="box-choice" onclick="openMysteryBox(2)">🎁 Box 2</div>
           <div class="box-choice" onclick="openMysteryBox(3)">🎁 Box 3</div>
         </div>
         <div style="font-size: 11px; color: var(--primary); margin-top: 8px;" id="box-status"></div>
-      </div>
-
-      <!-- Smart Game 1: Precision Timing -->
-      <div class="card">
-        <h4 style="margin: 0 0 4px 0; font-size: 14px;">Smart Game 1: Precision Timing</h4>
-        <div style="font-size: 12px; color: var(--text-muted);">সবুজ জোনের ভেতর মার্কার থাকলে "Hit Zone" চাপুন (+8 PTS Base)</div>
-        <div class="timing-track">
-          <div class="timing-zone"></div>
-          <div class="timing-marker" id="timing-marker"></div>
-        </div>
-        <button class="action-btn" style="width: 100%;" id="btn-timing" onclick="hitTimingZone()">Hit Zone</button>
-        <div style="font-size: 11px; color: var(--accent); margin-top: 6px;" id="timing-status"></div>
-      </div>
-
-      <!-- Smart Game 2: Pattern Recall -->
-      <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h4 style="margin: 0; font-size: 14px;">Smart Game 2: Pattern Recall</h4>
-          <button class="action-btn" id="btn-pattern-start" onclick="startPatternGame()">Show Pattern</button>
-        </div>
-        <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">জ্বলে ওঠা ৩টি প্যাড ঠিক ক্রমে চাপুন (+10 PTS Base)</div>
-        <div class="pattern-grid">
-          <div class="pattern-pad" id="pad-0" onclick="pressPatternPad(0)">Pad A</div>
-          <div class="pattern-pad" id="pad-1" onclick="pressPatternPad(1)">Pad B</div>
-          <div class="pattern-pad" id="pad-2" onclick="pressPatternPad(2)">Pad C</div>
-          <div class="pattern-pad" id="pad-3" onclick="pressPatternPad(3)">Pad D</div>
-        </div>
-        <div style="font-size: 11px; color: var(--accent);" id="pattern-status"></div>
       </div>
     </div>
 
@@ -945,23 +1085,15 @@ HTML_CONTENT = """<!DOCTYPE html>
     let selectedPaymentMethod = "bkash";
     let latestState = null;
 
-    // Timing game state
-    let timingPos = 0;
-    let timingDir = 1;
-    setInterval(() => {
-      timingPos += timingDir * 2.5;
-      if (timingPos >= 95) { timingPos = 95; timingDir = -1; }
-      if (timingPos <= 0) { timingPos = 0; timingDir = 1; }
-      const el = document.getElementById("timing-marker");
-      if (el) el.style.left = `${timingPos}%`;
-    }, 30);
-
-    // Pattern game state
-    let targetPattern = [];
-    let userPattern = [];
-    let acceptingPattern = false;
-
     document.getElementById("refLink").value = `https://t.me/${botUsername}?start=${tgUser.id}`;
+
+    function notifyUser(msg) {
+      if (tg.showAlert) {
+        tg.showAlert(msg);
+      } else {
+        alert(msg);
+      }
+    }
 
     function switchTab(tabId) {
       document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
@@ -972,10 +1104,13 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function selectSession(sessKey) {
       currentSession = sessKey;
-      ["session_1", "session_2", "session_3", "session_4"].forEach(k => {
+      ["session_1", "session_2", "session_3", "session_4", "games"].forEach(k => {
         document.getElementById(`sc-${k}`).classList.toggle("active", k === sessKey);
       });
-      renderSessionTasks();
+      const isGames = sessKey === "games";
+      document.getElementById("task-session-panel").style.display = isGames ? "none" : "block";
+      document.getElementById("games-session-panel").style.display = isGames ? "block" : "none";
+      if (!isGames) renderSessionTasks();
     }
 
     function selectMethod(method) {
@@ -1007,6 +1142,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     function renderSessionTasks() {
+      if (currentSession === "games") return;
       const container = document.getElementById("session-tasks-container");
       document.getElementById("active-session-heading").innerText = SESSION_DATA[currentSession].label;
 
@@ -1039,7 +1175,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         bonusBtn.className = "action-btn";
         bonusBtn.disabled = true;
       } else {
-        bonusBtn.innerText = "Claim Bonus (+25)";
+        bonusBtn.innerText = "Bonus (+25)";
         bonusBtn.className = "action-btn";
         bonusBtn.disabled = false;
       }
@@ -1071,13 +1207,11 @@ HTML_CONTENT = """<!DOCTYPE html>
       document.getElementById("wallet-bdt").innerText = bdtText;
       document.getElementById("wallet-usd").innerText = usdText;
 
-      // Check-in button
       const ciBtn = document.getElementById("btn-checkin");
       ciBtn.innerText = state.daily_checkin_done ? "Done ✓" : "Claim";
       ciBtn.className = `action-btn ${state.daily_checkin_done ? "done" : ""}`;
       ciBtn.disabled = state.daily_checkin_done;
 
-      // Pulse button
       const pBtn = document.getElementById("btn-pulse");
       const pSub = document.getElementById("pulse-sub");
       if (state.pulse_remaining_sec > 0) {
@@ -1091,11 +1225,22 @@ HTML_CONTENT = """<!DOCTYPE html>
         pSub.innerText = "প্রতি ৩০ মিনিট পরপর পালস ক্লেম";
       }
 
-      // Session badges
       ["session_1", "session_2", "session_3", "session_4"].forEach(k => {
         const s = state.sessions?.[k] || { done: 0, total: 5 };
         document.getElementById(`sc-sub-${k}`).innerText = `${s.done}/${s.total}`;
       });
+
+      const doneGames = new Set(state.done_games || []);
+      document.getElementById("sc-sub-games").innerText = `${doneGames.size}/3`;
+      if (doneGames.has("game_catch_dodge")) {
+        document.getElementById("catch-reward-badge").innerText = "Claimed ✓";
+      }
+      if (doneGames.has("game_merge_2048")) {
+        document.getElementById("merge-reward-badge").innerText = "Claimed ✓";
+      }
+      if (doneGames.has("game_snake")) {
+        document.getElementById("snake-reward-badge").innerText = "Claimed ✓";
+      }
 
       if (state.quiz_done) {
         document.getElementById("quiz-status").innerText = "আজকের কুইজ সম্পন্ন হয়েছে ✓";
@@ -1103,24 +1248,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (state.mystery_box_done) {
         document.getElementById("box-status").innerText = "আজকের মিস্ট্রি বক্স খোলা হয়েছে ✓";
       }
-      if (state.timing_game_done) {
-        document.getElementById("btn-timing").innerText = "Completed Today ✓";
-        document.getElementById("btn-timing").disabled = true;
-      }
-      if (state.pattern_game_done) {
-        document.getElementById("btn-pattern-start").innerText = "Completed Today ✓";
-        document.getElementById("btn-pattern-start").disabled = true;
-      }
 
       renderSessionTasks();
-    }
-
-    function notifyUser(msg) {
-      if (tg.showAlert) {
-        tg.showAlert(msg);
-      } else {
-        alert(msg);
-      }
     }
 
     async function initApp() {
@@ -1228,77 +1357,310 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
-    async function hitTimingZone() {
-      const inZone = timingPos >= 36 && timingPos <= 62;
-      if (!inZone) {
-        document.getElementById("timing-status").innerText = "সবুজ জোনের বাইরে হিট হয়েছে—আবার চেষ্টা করুন!";
+    async function claimGameWin(gameCode, winMsg) {
+      if ((latestState?.done_games || []).includes(gameCode)) {
+        notifyUser(winMsg + " (আজকের রিওয়ার্ড ইতিমধ্যে নেওয়া হয়েছে)");
         return;
       }
       const res = await fetch("/api/game-reward", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ telegram_id: tgUser.id, game_code: "game_timing" })
+        body: JSON.stringify({ telegram_id: tgUser.id, game_code: gameCode })
       });
       const data = await res.json();
       if (res.ok) {
         renderAll(data.state);
-        document.getElementById("timing-status").innerText = `পারফেক্ট হিট! +${data.earned_points} PTS`;
+        notifyUser(`${winMsg} +${data.earned_points} PTS যোগ হয়েছে!`);
       } else {
-        document.getElementById("timing-status").innerText = data.detail || "সমস্যা হয়েছে";
+        notifyUser(data.detail || winMsg);
       }
     }
 
-    function startPatternGame() {
-      targetPattern = [0, 1, 2, 3].sort(() => Math.random() - 0.5).slice(0, 3);
-      userPattern = [];
-      acceptingPattern = false;
-      document.getElementById("pattern-status").innerText = "প্যাটার্নটি লক্ষ্য করুন...";
+    // --- GAME 1: CATCH & DODGE ---
+    let catchTimerId = null;
+    let catchCountdownId = null;
+    let catchRunning = false;
+    let catchScore = 0;
+    let catchTimeLeft = 20;
+    let basketX = 50; // %
+    let fallingObjs = [];
 
-      targetPattern.forEach((padId, idx) => {
-        setTimeout(() => {
-          const pad = document.getElementById(`pad-${padId}`);
-          pad.classList.add("lit");
-          setTimeout(() => pad.classList.remove("lit"), 350);
-          if (idx === targetPattern.length - 1) {
-            setTimeout(() => {
-              acceptingPattern = true;
-              document.getElementById("pattern-status").innerText = "এখন ঠিক একই ক্রমে ৩টি প্যাড চাপুন";
-            }, 420);
+    function setBasketPos(pct) {
+      basketX = Math.max(12, Math.min(88, pct));
+      document.getElementById("catch-basket").style.left = `${basketX}%`;
+    }
+
+    function nudgeBasket(deltaPx) {
+      const canvas = document.getElementById("catch-canvas");
+      const width = canvas.clientWidth || 300;
+      const pctDelta = (deltaPx / width) * 100;
+      setBasketPos(basketX + pctDelta);
+    }
+
+    function moveBasketTouch(e) {
+      if (!e.touches.length) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = ((e.touches[0].clientX - rect.left) / rect.width) * 100;
+      setBasketPos(pct);
+    }
+
+    function moveBasketMouse(e) {
+      if (e.buttons !== 1) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      setBasketPos(pct);
+    }
+
+    function startCatchGame() {
+      clearInterval(catchTimerId);
+      clearInterval(catchCountdownId);
+      document.querySelectorAll(".catch-item").forEach(el => el.remove());
+
+      catchRunning = true;
+      catchScore = 0;
+      catchTimeLeft = 20;
+      fallingObjs = [];
+      document.getElementById("catch-score").innerText = "0";
+      document.getElementById("catch-time").innerText = "20s";
+
+      let tick = 0;
+      catchTimerId = setInterval(() => {
+        if (!catchRunning) return;
+        tick += 1;
+        if (tick % 14 === 0) {
+          const isBomb = Math.random() < 0.34;
+          const obj = {
+            x: 12 + Math.random() * 76,
+            y: 6,
+            speed: 2.3 + Math.random() * 1.4,
+            isBomb,
+            el: document.createElement("div")
+          };
+          obj.el.className = `catch-item ${isBomb ? "catch-bomb" : "catch-coin"}`;
+          obj.el.innerText = isBomb ? "✕" : "+";
+          document.getElementById("catch-canvas").appendChild(obj.el);
+          fallingObjs.push(obj);
+        }
+
+        const nextObjs = [];
+        for (const o of fallingObjs) {
+          o.y += o.speed;
+          o.el.style.left = `${o.x}%`;
+          o.el.style.top = `${o.y}%`;
+
+          const hitBasket = o.y >= 82 && o.y <= 93 && Math.abs(o.x - basketX) <= 14;
+          if (hitBasket) {
+            o.el.remove();
+            if (o.isBomb) {
+              catchScore = Math.max(0, catchScore - 2);
+            } else {
+              catchScore += 1;
+            }
+            document.getElementById("catch-score").innerText = String(catchScore);
+          } else if (o.y < 102) {
+            nextObjs.push(o);
+          } else {
+            o.el.remove();
           }
-        }, idx * 550);
-      });
+        }
+        fallingObjs = nextObjs;
+      }, 40);
+
+      catchCountdownId = setInterval(() => {
+        catchTimeLeft -= 1;
+        document.getElementById("catch-time").innerText = `${catchTimeLeft}s`;
+        if (catchTimeLeft <= 0) {
+          catchRunning = false;
+          clearInterval(catchTimerId);
+          clearInterval(catchCountdownId);
+          document.querySelectorAll(".catch-item").forEach(el => el.remove());
+          if (catchScore >= 6) {
+            claimGameWin("game_catch_dodge", `Catch & Dodge সম্পন্ন (${catchScore} স্কোর)!`);
+          } else {
+            notifyUser(`রাউন্ড শেষ! স্কোর: ${catchScore} (কমপক্ষে ৬ স্কোর লাগবে)`);
+          }
+        }
+      }, 1000);
     }
 
-    async function pressPatternPad(padId) {
-      if (!acceptingPattern) return;
-      userPattern.push(padId);
-      const stepIdx = userPattern.length - 1;
+    // --- GAME 2: NUMBER MERGE 2048 (3x3) ---
+    let mergeBoard = [];
+    let mergeScore = 0;
+    let mergeRewardSent = false;
 
-      const pad = document.getElementById(`pad-${padId}`);
-      pad.classList.add("lit");
-      setTimeout(() => pad.classList.remove("lit"), 220);
-
-      if (targetPattern[stepIdx] !== padId) {
-        acceptingPattern = false;
-        document.getElementById("pattern-status").innerText = "ক্রম মেলেনি—আবার Show Pattern চাপুন।";
-        return;
-      }
-
-      if (userPattern.length === targetPattern.length) {
-        acceptingPattern = false;
-        const res = await fetch("/api/game-reward", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ telegram_id: tgUser.id, game_code: "game_pattern" })
-        });
-        const data = await res.json();
-        if (res.ok) {
-          renderAll(data.state);
-          document.getElementById("pattern-status").innerText = `প্যাটার্ন সম্পন্ন! +${data.earned_points} PTS`;
-        } else {
-          document.getElementById("pattern-status").innerText = data.detail || "সমস্যা হয়েছে";
+    function spawnMergeTile() {
+      const empty = [];
+      for (let r = 0; r < 3; r++) {
+        for (let c = 0; c < 3; c++) {
+          if (mergeBoard[r][c] === 0) empty.push([r, c]);
         }
       }
+      if (!empty.length) return;
+      const [r, c] = empty[Math.floor(Math.random() * empty.length)];
+      mergeBoard[r][c] = Math.random() < 0.8 ? 2 : 4;
+    }
+
+    function initMergeGame() {
+      mergeBoard = [
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0]
+      ];
+      mergeScore = 0;
+      mergeRewardSent = false;
+      spawnMergeTile();
+      spawnMergeTile();
+      renderMergeBoard();
+    }
+
+    function renderMergeBoard() {
+      const grid = document.getElementById("merge-grid");
+      let maxVal = 2;
+      let html = "";
+      for (let r = 0; r < 3; r++) {
+        for (let c = 0; c < 3; c++) {
+          const v = mergeBoard[r][c];
+          if (v > maxVal) maxVal = v;
+          html += `<div class="merge-tile ${v ? "val-" + v : ""}">${v || ""}</div>`;
+        }
+      }
+      grid.innerHTML = html;
+      document.getElementById("merge-score").innerText = String(mergeScore);
+      document.getElementById("merge-max").innerText = String(maxVal);
+
+      if (!mergeRewardSent && (maxVal >= 32 || mergeScore >= 40)) {
+        mergeRewardSent = true;
+        claimGameWin("game_merge_2048", `Number Merge লক্ষ্য পূরণ (Max ${maxVal})!`);
+      }
+    }
+
+    function slideAndMergeLine(line) {
+      const nums = line.filter(x => x !== 0);
+      const out = [];
+      let i = 0;
+      while (i < nums.length) {
+        if (i + 1 < nums.length && nums[i] === nums[i + 1]) {
+          const merged = nums[i] * 2;
+          mergeScore += merged;
+          out.push(merged);
+          i += 2;
+        } else {
+          out.push(nums[i]);
+          i += 1;
+        }
+      }
+      while (out.length < 3) out.push(0);
+      return out;
+    }
+
+    function moveMerge(dir) {
+      const prev = JSON.stringify(mergeBoard);
+      if (dir === "left") {
+        for (let r = 0; r < 3; r++) mergeBoard[r] = slideAndMergeLine(mergeBoard[r]);
+      } else if (dir === "right") {
+        for (let r = 0; r < 3; r++) mergeBoard[r] = slideAndMergeLine([...mergeBoard[r]].reverse()).reverse();
+      } else if (dir === "up") {
+        for (let c = 0; c < 3; c++) {
+          const col = [mergeBoard[0][c], mergeBoard[1][c], mergeBoard[2][c]];
+          const res = slideAndMergeLine(col);
+          for (let r = 0; r < 3; r++) mergeBoard[r][c] = res[r];
+        }
+      } else if (dir === "down") {
+        for (let c = 0; c < 3; c++) {
+          const col = [mergeBoard[2][c], mergeBoard[1][c], mergeBoard[0][c]];
+          const res = slideAndMergeLine(col);
+          for (let r = 0; r < 3; r++) mergeBoard[2 - r][c] = res[r];
+        }
+      }
+
+      if (JSON.stringify(mergeBoard) !== prev) {
+        spawnMergeTile();
+        renderMergeBoard();
+      }
+    }
+
+    // --- GAME 3: SNAKE (9x9) ---
+    const SNAKE_SIZE = 9;
+    let snakeLoopId = null;
+    let snakeBody = [];
+    let snakeDir = { x: 1, y: 0 };
+    let snakeFood = { x: 6, y: 4 };
+    let snakeScore = 0;
+    let snakeRewardSent = false;
+
+    function randomFood() {
+      while (true) {
+        const fx = Math.floor(Math.random() * SNAKE_SIZE);
+        const fy = Math.floor(Math.random() * SNAKE_SIZE);
+        if (!snakeBody.some(s => s.x === fx && s.y === fy)) {
+          return { x: fx, y: fy };
+        }
+      }
+    }
+
+    function renderSnakeGrid() {
+      const grid = document.getElementById("snake-grid");
+      let html = "";
+      for (let y = 0; y < SNAKE_SIZE; y++) {
+        for (let x = 0; x < SNAKE_SIZE; x++) {
+          let cls = "snake-cell";
+          if (snakeBody[0]?.x === x && snakeBody[0]?.y === y) cls += " head";
+          else if (snakeBody.slice(1).some(s => s.x === x && s.y === y)) cls += " body";
+          else if (snakeFood.x === x && snakeFood.y === y) cls += " food";
+          html += `<div class="${cls}"></div>`;
+        }
+      }
+      grid.innerHTML = html;
+      document.getElementById("snake-score").innerText = String(snakeScore);
+    }
+
+    function setSnakeDir(dx, dy) {
+      if (dx === -snakeDir.x && dy === -snakeDir.y) return;
+      snakeDir = { x: dx, y: dy };
+    }
+
+    function startSnakeGame() {
+      clearInterval(snakeLoopId);
+      snakeBody = [{ x: 3, y: 4 }, { x: 2, y: 4 }, { x: 1, y: 4 }];
+      snakeDir = { x: 1, y: 0 };
+      snakeScore = 0;
+      snakeRewardSent = false;
+      snakeFood = randomFood();
+      document.getElementById("snake-status-hud").innerText = "Playing";
+      renderSnakeGrid();
+
+      snakeLoopId = setInterval(() => {
+        const head = snakeBody[0];
+        const nx = head.x + snakeDir.x;
+        const ny = head.y + snakeDir.y;
+
+        const hitWall = nx < 0 || ny < 0 || nx >= SNAKE_SIZE || ny >= SNAKE_SIZE;
+        const hitSelf = snakeBody.some(seg => seg.x === nx && seg.y === ny);
+
+        if (hitWall || hitSelf) {
+          clearInterval(snakeLoopId);
+          document.getElementById("snake-status-hud").innerText = "Game Over";
+          notifyUser(`Snake গেম ওভার! স্কোর: ${snakeScore}`);
+          return;
+        }
+
+        const newHead = { x: nx, y: ny };
+        snakeBody.unshift(newHead);
+
+        if (nx === snakeFood.x && ny === snakeFood.y) {
+          snakeScore += 1;
+          snakeFood = randomFood();
+          if (!snakeRewardSent && snakeScore >= 5) {
+            snakeRewardSent = true;
+            clearInterval(snakeLoopId);
+            document.getElementById("snake-status-hud").innerText = "Won ✓";
+            claimGameWin("game_snake", `Snake লক্ষ্য পূরণ (${snakeScore} স্কোর)!`);
+          }
+        } else {
+          snakeBody.pop();
+        }
+        renderSnakeGrid();
+      }, 240);
     }
 
     function copyRefLink() {
@@ -1337,6 +1699,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
+    initMergeGame();
+    renderSnakeGrid();
     initApp();
   </script>
 </body>
@@ -1671,11 +2035,7 @@ def mystery_box(payload: MysteryBoxPayload):
 
 @app.post("/api/game-reward")
 def game_reward(payload: GameRewardPayload):
-    game_base_map = {
-        "game_timing": 8,
-        "game_pattern": 10,
-    }
-    if payload.game_code not in game_base_map:
+    if payload.game_code not in GAME_REWARD_POINTS:
         raise HTTPException(status_code=400, detail="Invalid game")
 
     conn = get_conn()
@@ -1692,7 +2052,7 @@ def game_reward(payload: GameRewardPayload):
         conn.close()
         raise HTTPException(status_code=400, detail="আজকের গেম রিওয়ার্ড নেওয়া হয়ে গেছে")
 
-    earned, _ = calc_earned_points(user["active_referrals"], game_base_map[payload.game_code])
+    earned, _ = calc_earned_points(user["active_referrals"], GAME_REWARD_POINTS[payload.game_code])
     cur.execute(
         "UPDATE users SET points = points + ? WHERE telegram_id = ?",
         (earned, payload.telegram_id),
