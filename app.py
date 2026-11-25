@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from database import get_conn, init_db
 
@@ -14,6 +14,170 @@ ACTIVE_REF_TASK_REQ = 3      # রেফারেল "অ্যাক্টি�
 POINTS_PER_BDT = 10          # 10 পয়েন্ট = 1 টাকা
 MIN_WITHDRAW_POINTS = 1000   # রেফার ছাড়াই মিনিমাম উইথড্র 1000 পয়েন্ট
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "change-this-admin-key")
+
+HTML_CONTENT = """<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TapMint • Mining & Tasks</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
+    .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 14px; border: 1px solid #334155; }
+    .header-brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .badge { background: #064e3b; color: #34d399; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: bold; }
+    .section-tag { display: inline-block; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: #334155; color: #e2e8f0; margin-bottom: 6px; }
+    button { background: #10b981; color: #fff; border: none; padding: 10px 14px; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 8px; font-weight: bold; font-size: 14px; }
+    button:hover { background: #059669; }
+    button.monetag-btn { background: #0284c7; }
+    button.monetag-btn:hover { background: #0369a1; }
+    input, select { width: 100%; padding: 10px; margin-top: 8px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; }
+    .small { font-size: 13px; color: #94a3b8; line-height: 1.5; }
+    .status-box { margin-top: 10px; padding: 10px; border-radius: 8px; background: #0f172a; color: #38bdf8; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header-brand">
+      <h2 style="margin:0;">TapMint</h2>
+      <span class="badge">Mining & Tasks</span>
+    </div>
+    <p>পয়েন্ট: <strong id="points">0</strong></p>
+    <p>সম্পন্ন টাস্ক: <strong id="tasks">0</strong></p>
+    <p>অ্যাক্টিভ রেফারেল: <strong id="refs">0</strong></p>
+    <p class="small">রেফার না করলেও মিনিমাম পয়েন্ট হলে উইথড্র করতে পারবেন। রেফার করলে টাস্ক বোনাস বাড়বে।</p>
+  </div>
+
+  <div class="card">
+    <h3>ডেইলি টাস্ক (মোট ২০টি লিংক)</h3>
+    <p class="small">প্রতিটি লিংক ভিজিট করে ফিরে এলে সার্ভার থেকে পয়েন্ট যোগ হবে।</p>
+
+    <span class="section-tag">Adsterra Smart Links (১ – ১০)</span>
+    <button onclick="doTask('adsterra_1', 'https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7')">টাস্ক ১: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_2', 'https://asiafilm.org/4/3bd5bca9029900a8d0d2bb526ebd7214')">টাস্ক ২: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_3', 'https://asiafilm.org/4/224868d40ac462d276354c5696553960')">টাস্ক ৩: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_4', 'https://asiafilm.org/4/2a16c7d7870cf593884b4976629a6156')">টাস্ক ৪: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_5', 'https://asiafilm.org/4/4f3af0df8bb071b2232440532691af67')">টাস্ক ৫: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_6', 'https://asiafilm.org/4/5909d9fd3d02125d0447b6d1702377d7')">টাস্ক ৬: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_7', 'https://asiafilm.org/4/c75201a3ea80e241a6008c8f503e0855')">টাস্ক ৭: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_8', 'https://asiafilm.org/4/9b1be208097bfdbce8298db933df0875')">টাস্ক ৮: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_9', 'https://asiafilm.org/4/5bac8f36e93727dc1e10c13f28ad12ba')">টাস্ক ৯: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+    <button onclick="doTask('adsterra_10', 'https://asiafilm.org/4/948938a94d72df36b23ba9f97ef3bfff')">টাস্ক ১০: স্মার্ট লিংক ভিজিট (+পয়েন্ট)</button>
+
+    <div style="margin-top: 14px;">
+      <span class="section-tag">Monetag Links (১১ – ২০)</span>
+    </div>
+    <button class="monetag-btn" onclick="doTask('monetag_11', 'https://uplcm.com/4/12351466')">টাস্ক ১১: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_12', 'https://uplcm.com/4/12351467')">টাস্ক ১২: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_13', 'https://uplcm.com/4/12351468')">টাস্ক ১৩: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_14', 'https://uplcm.com/4/12351473')">টাস্ক ১৪: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_15', 'https://uplcm.com/4/12351474')">টাস্ক ১৫: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_16', 'https://uplcm.com/4/12351475')">টাস্ক ১৬: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_17', 'https://uplcm.com/4/12351476')">টাস্ক ১৭: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_18', 'https://uplcm.com/4/12351477')">টাস্ক ১৮: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_19', 'https://uplcm.com/4/12351478')">টাস্ক ১৯: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+    <button class="monetag-btn" onclick="doTask('monetag_20', 'https://uplcm.com/4/12351479')">টাস্ক ২০: Monetag লিংক ভিজিট (+পয়েন্ট)</button>
+  </div>
+
+  <div class="card">
+    <h3>রেফারেল লিংক</h3>
+    <input id="refLink" readonly />
+    <button onclick="copyRefLink()">রেফারেল লিংক কপি করুন</button>
+  </div>
+
+  <div class="card">
+    <h3>উইথড্র (bKash / Nagad / Binance USDT)</h3>
+    <select id="method">
+      <option value="bkash">bKash</option>
+      <option value="nagad">Nagad</option>
+      <option value="binance_usdt">Binance (USDT)</option>
+    </select>
+    <input id="accountInfo" placeholder="বিকাশ/নগদ নম্বর বা Binance USDT অ্যাড্রেস" />
+    <input id="withdrawPoints" type="number" placeholder="কত পয়েন্ট তুলতে চান (যেমন 1000)" />
+    <button onclick="submitWithdraw()">উইথড্র রিকোয়েস্ট পাঠান</button>
+    <div id="statusMsg" class="status-box">রেডি</div>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+
+    const tgUser = tg.initDataUnsafe?.user || { id: 100001, username: "test_user" };
+    const startParam = tg.initDataUnsafe?.start_param || null;
+    const botUsername = "tapmint99_bot";
+
+    document.getElementById("refLink").value =
+      `https://t.me/${botUsername}?start=${tgUser.id}`;
+
+    function setStatus(msg) {
+      document.getElementById("statusMsg").innerText = msg;
+    }
+
+    function copyRefLink() {
+      const input = document.getElementById("refLink");
+      input.select();
+      navigator.clipboard?.writeText(input.value);
+      setStatus("রেফারেল লিংক কপি হয়েছে!");
+    }
+
+    async function initApp() {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          telegram_id: tgUser.id,
+          username: tgUser.username,
+          referrer_id: startParam ? Number(startParam) : null
+        })
+      });
+      const data = await res.json();
+      renderUser(data);
+    }
+
+    function renderUser(u) {
+      document.getElementById("points").innerText = u.points;
+      document.getElementById("tasks").innerText = u.completed_tasks;
+      document.getElementById("refs").innerText = u.active_referrals;
+    }
+
+    async function doTask(taskCode, url) {
+      window.open(url, "_blank");
+      const res = await fetch("/api/complete-task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ telegram_id: tgUser.id, task_code: taskCode })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        renderUser(data.user);
+        setStatus(`+${data.earned_points} পয়েন্ট যোগ হয়েছে (${data.bonus_pct}% রেফারেল বোনাসসহ)।`);
+      }
+    }
+
+    async function submitWithdraw() {
+      const method = document.getElementById("method").value;
+      const account_info = document.getElementById("accountInfo").value;
+      const points = Number(document.getElementById("withdrawPoints").value);
+
+      const res = await fetch("/api/withdraw", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ telegram_id: tgUser.id, method, account_info, points })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        renderUser(data.user);
+        setStatus(`উইথড্র রিকোয়েস্ট জমা হয়েছে (${data.amount_bdt} টাকা সমতুল্য)।`);
+      } else {
+        setStatus(data.detail || "সমস্যা হয়েছে");
+      }
+    }
+
+    initApp();
+  </script>
+</body>
+</html>"""
 
 
 class AuthPayload(BaseModel):
@@ -45,9 +209,9 @@ def startup():
     init_db()
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def home():
-    return FileResponse("templates/index.html")
+    return HTMLResponse(content=HTML_CONTENT)
 
 
 @app.post("/api/auth")
