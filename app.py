@@ -1138,6 +1138,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     let currentSession = "session_1";
     let selectedPaymentMethod = "bkash";
     let latestState = null;
+    let inAppAdStarted = false;
 
     document.getElementById("refLink").value = `https://t.me/${botUsername}?start=${tgUser.id}`;
 
@@ -1147,6 +1148,38 @@ HTML_CONTENT = """<!DOCTYPE html>
       } else {
         alert(msg);
       }
+    }
+
+    // --- Monetag In-App Interstitial ---
+    function startInAppInterstitial() {
+      if (inAppAdStarted || typeof window.show_12352643 !== "function") return;
+      inAppAdStarted = true;
+      try {
+        window.show_12352643({
+          type: "inApp",
+          inAppSettings: {
+            frequency: 2,
+            capping: 0.1,
+            interval: 30,
+            timeout: 5,
+            everyPage: false
+          }
+        });
+      } catch (err) {
+        console.warn("In-app interstitial warning:", err);
+      }
+    }
+
+    // --- Monetag Rewarded Interstitial Helper ---
+    async function runRewardedAd(onComplete) {
+      if (typeof window.show_12352643 === "function") {
+        try {
+          await window.show_12352643();
+        } catch (err) {
+          console.warn("Rewarded ad fallback:", err);
+        }
+      }
+      await onComplete();
     }
 
     function switchTab(tabId) {
@@ -1339,6 +1372,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
       const data = await res.json();
       renderAll(data);
+      startInAppInterstitial();
     }
 
     async function doTask(taskCode, url) {
@@ -1358,18 +1392,20 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function claimCheckin() {
-      const res = await fetch("/api/daily-checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ telegram_id: tgUser.id })
+      await runRewardedAd(async () => {
+        const res = await fetch("/api/daily-checkin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ telegram_id: tgUser.id })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          renderAll(data.state);
+          notifyUser(`Daily Check-in: +${data.earned_points} PTS`);
+        } else {
+          notifyUser(data.detail || "সমস্যা হয়েছে");
+        }
       });
-      const data = await res.json();
-      if (res.ok) {
-        renderAll(data.state);
-        notifyUser(`Daily Check-in: +${data.earned_points} PTS`);
-      } else {
-        notifyUser(data.detail || "সমস্যা হয়েছে");
-      }
     }
 
     async function claimPulse() {
@@ -1418,18 +1454,20 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function openMysteryBox(boxNum) {
-      const res = await fetch("/api/mystery-box", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ telegram_id: tgUser.id, box_number: boxNum })
+      await runRewardedAd(async () => {
+        const res = await fetch("/api/mystery-box", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ telegram_id: tgUser.id, box_number: boxNum })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          renderAll(data.state);
+          document.getElementById("box-status").innerText = `Box ${boxNum} থেকে +${data.earned_points} PTS পেয়েছেন!`;
+        } else {
+          document.getElementById("box-status").innerText = data.detail || "আজকের বক্স খোলা হয়ে গেছে";
+        }
       });
-      const data = await res.json();
-      if (res.ok) {
-        renderAll(data.state);
-        document.getElementById("box-status").innerText = `Box ${boxNum} থেকে +${data.earned_points} PTS পেয়েছেন!`;
-      } else {
-        document.getElementById("box-status").innerText = data.detail || "আজকের বক্স খোলা হয়ে গেছে";
-      }
     }
 
     async function claimGameWin(gameCode, winMsg) {
@@ -1437,18 +1475,20 @@ HTML_CONTENT = """<!DOCTYPE html>
         notifyUser(winMsg + " (আজকের রিওয়ার্ড ইতিমধ্যে নেওয়া হয়েছে)");
         return;
       }
-      const res = await fetch("/api/game-reward", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ telegram_id: tgUser.id, game_code: gameCode })
+      await runRewardedAd(async () => {
+        const res = await fetch("/api/game-reward", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ telegram_id: tgUser.id, game_code: gameCode })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          renderAll(data.state);
+          notifyUser(`${winMsg} +${data.earned_points} PTS যোগ হয়েছে!`);
+        } else {
+          notifyUser(data.detail || winMsg);
+        }
       });
-      const data = await res.json();
-      if (res.ok) {
-        renderAll(data.state);
-        notifyUser(`${winMsg} +${data.earned_points} PTS যোগ হয়েছে!`);
-      } else {
-        notifyUser(data.detail || winMsg);
-      }
     }
 
     // --- GAME 1: CATCH & DODGE ---
