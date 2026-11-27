@@ -51,7 +51,6 @@ MONETAG_LINKS = [
 
 ALL_AD_LINKS = ADSTERRA_LINKS + MONETAG_LINKS
 
-# Build 100-task ad schedule across 5 sessions x 20 tasks using the 20 Adsterra & Monetag links
 TASK_SCHEDULE_100 = []
 for _idx in range(100):
     if _idx % 2 == 0:
@@ -418,7 +417,11 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
 
     total_refs = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (user_id,)).fetchone()["c"]
     active_refs = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE referred_by = ? AND total_earned_pts > 0",
+        """
+        SELECT COUNT(*) AS c FROM users u
+        WHERE u.referred_by = ?
+          AND (SELECT COUNT(*) FROM completed_tasks ct WHERE ct.user_id = u.user_id) >= 5
+        """,
         (user_id,),
     ).fetchone()["c"]
     ref_bonus = conn.execute(
@@ -1161,6 +1164,16 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .btn-3d-green:active { transform: translateY(2px); border-bottom-width: 2px; }
   .btn-3d-green:disabled { opacity: 0.45; cursor: not-allowed; }
 
+  .btn-3d-blue {
+    width: 100%; border: 1px solid #7dd3fc; border-bottom: 4px solid #0369a1;
+    border-radius: 15px; padding: 12px 14px;
+    background: linear-gradient(180deg, #38bdf8 0%, #0284c7 70%, #0369a1 100%);
+    color: #f8fafc; font-weight: 800; font-size: 14px; cursor: pointer;
+    box-shadow: 0 9px 20px rgba(2, 132, 199, 0.36), inset 0 1.5px 0 rgba(255, 255, 255, 0.45);
+    transition: transform 0.08s ease;
+  }
+  .btn-3d-blue:active { transform: translateY(2px); border-bottom-width: 2px; }
+
   .home-link-card {
     display: flex; align-items: center; justify-content: space-between;
     background: linear-gradient(175deg, rgba(28, 48, 55, 0.95), rgba(12, 21, 26, 0.99));
@@ -1351,6 +1364,41 @@ MINI_APP_HTML = """<!DOCTYPE html>
     color: #f3e8d2; border-radius: 14px; padding: 11px 12px; font-size: 12px;
     line-height: 1.45; margin-top: 8px;
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
+  }
+
+  /* Photo 1 3D Invite & Earn Referral Style */
+  .ref-stat-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .ref-stat-card {
+    background: linear-gradient(175deg, rgba(28, 46, 54, 0.96), rgba(12, 21, 26, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 3px solid rgba(4, 9, 12, 0.92);
+    border-radius: 16px; padding: 12px 6px; text-align: center;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  .ref-ico-3d {
+    width: 34px; height: 34px; margin: 0 auto 7px; border-radius: 10px;
+    background: linear-gradient(180deg, rgba(250, 204, 21, 0.18), rgba(15, 23, 42, 0.88));
+    border: 1px solid rgba(250, 204, 21, 0.32);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .ref-link-inp {
+    width: 100%; background: rgba(7, 13, 17, 0.95);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    color: #e2e8f0; border-radius: 12px; padding: 11px 12px;
+    font-size: 12px; margin-bottom: 11px;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.65);
+  }
+  .ref-btn-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ref-rules-card {
+    background: linear-gradient(175deg, rgba(26, 43, 50, 0.96), rgba(12, 20, 25, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 3px solid rgba(4, 9, 12, 0.92);
+    border-radius: 18px; padding: 14px;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.54), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  }
+  .ref-rule-item {
+    font-size: 12px; color: #cbd5e1; line-height: 1.5; margin-top: 8px;
   }
 
   /* Playable Game & Ad Modal */
@@ -1628,24 +1676,46 @@ MINI_APP_HTML = """<!DOCTYPE html>
   </section>
 
   <section class="page" id="page-refer">
-    <div class="card-3d">
-      <div style="font-size:18px;font-weight:800;margin-bottom:12px;">Referral Center</div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin-bottom:12px;">
-        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
-          <div style="font-size:18px;font-weight:800;" id="ref-cnt">0</div>
-          <div class="muted" style="font-size:11px;">Total Referrals</div>
-        </div>
-        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
-          <div style="font-size:18px;font-weight:800;" id="ref-act">0</div>
-          <div class="muted" style="font-size:11px;">Active Referrals</div>
-        </div>
-        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
-          <div style="font-size:18px;font-weight:800;color:#34d399;" id="ref-pts">0</div>
-          <div class="muted" style="font-size:11px;">Current Bonus</div>
-        </div>
+    <div style="text-align:center;margin-bottom:14px;">
+      <div style="font-size:21px;font-weight:800;">Invite & Earn</div>
+      <div class="muted" style="margin-top:3px;">বন্ধুদের আমন্ত্রণ জানান ও লাইফটাইম কমিশন পান</div>
+    </div>
+
+    <div class="ref-stat-3">
+      <div class="ref-stat-card">
+        <div class="ref-ico-3d">👥</div>
+        <div style="font-size:11px;color:#cbd5e1;font-weight:600;">Total Referrals</div>
+        <div style="font-size:19px;font-weight:800;color:#ffffff;margin-top:2px;" id="ref-cnt">0</div>
+        <div style="font-size:10px;color:#64748b;margin-top:2px;">মোট রেফার</div>
       </div>
-      <input class="inp" id="ref-url" readonly />
-      <button class="btn-3d-green" onclick="copyRef()">Copy Referral Link</button>
+      <div class="ref-stat-card">
+        <div class="ref-ico-3d">🏅</div>
+        <div style="font-size:11px;color:#cbd5e1;font-weight:600;">Active Referrals</div>
+        <div style="font-size:19px;font-weight:800;color:#ffffff;margin-top:2px;" id="ref-act">0</div>
+        <div style="font-size:10px;color:#64748b;margin-top:2px;">৫+ টাস্ক সম্পন্ন</div>
+      </div>
+      <div class="ref-stat-card">
+        <div class="ref-ico-3d">✖</div>
+        <div style="font-size:11px;color:#cbd5e1;font-weight:600;">Current Bonus</div>
+        <div style="font-size:15px;font-weight:800;color:#4ade80;margin-top:4px;" id="ref-pts">+15% Boost</div>
+        <div style="font-size:10px;color:#64748b;margin-top:3px;">টাস্ক বোনাস</div>
+      </div>
+    </div>
+
+    <div class="card-3d">
+      <div style="font-size:14px;font-weight:800;margin-bottom:8px;">3D Referral Link</div>
+      <input class="ref-link-inp" id="ref-url" readonly />
+      <div class="ref-btn-pair">
+        <button class="btn-3d-green" style="padding:11px 10px;font-size:13px;" onclick="copyRef()">📋 Copy Link</button>
+        <button class="btn-3d-blue" style="padding:11px 10px;font-size:13px;" onclick="shareTelegram()">✈ Share on Telegram</button>
+      </div>
+    </div>
+
+    <div class="ref-rules-card">
+      <div style="font-size:15px;font-weight:800;color:#ffffff;">নিয়মাবলী & শর্ত</div>
+      <div class="ref-rule-item">1. আপনার লিংক বন্ধুদের সাথে শেয়ার করুন।</div>
+      <div class="ref-rule-item">2. বন্ধু জয়েন করে কমপক্ষে ৫টি টাস্ক শেষ করলে অ্যাক্টিভ গণ্য হবে।</div>
+      <div class="ref-rule-item">3. প্রতিটি অ্যাক্টিভ রেফারেলে +৫% বোনাস (সর্বোচ্চ ৩০%) ও ২য় স্তরের কমিশন।</div>
     </div>
   </section>
 
@@ -1671,7 +1741,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         </div>
         <button class="pay-btn-3d" style="padding:7px 12px;" onclick="toggleWForm()">Change Wallet</button>
       </div>
-      <div id="w-form" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.14);">
+      <div id="w-form" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148, 163, 184, 0.14);">
         <input class="inp" id="w-acc" placeholder="Wallet Number / Binance Address" />
         <input class="inp" id="w-pin-set" type="password" maxlength="4" placeholder="Set 4-Digit PIN" />
         <button class="btn-3d-green" onclick="saveW()">Save Wallet & PIN</button>
@@ -1929,9 +1999,11 @@ function draw() {
   drawTasks();
   drawGames();
 
+  const actCount = parseInt(ST.referral.active_referrals || 0, 10);
+  const boostPct = Math.min(30, actCount * 5);
   document.getElementById("ref-cnt").textContent = ST.referral.total_referrals;
-  document.getElementById("ref-act").textContent = ST.referral.active_referrals;
-  document.getElementById("ref-pts").textContent = ST.referral.current_bonus_pts;
+  document.getElementById("ref-act").textContent = actCount;
+  document.getElementById("ref-pts").textContent = `+${boostPct}% Boost`;
   document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(USER)}`;
 
   if (ST.wallet.connected) {
@@ -2388,6 +2460,12 @@ function copyRef() {
   el.select();
   navigator.clipboard?.writeText(el.value);
   notify("Referral link copied");
+}
+
+function shareTelegram() {
+  const link = document.getElementById("ref-url").value;
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("TapMint এ জয়েন করে টাস্ক, মাইনিং ও গেম খেলে পয়েন্ট আয় করুন!")}`;
+  window.open(shareUrl, "_blank", "noopener,noreferrer");
 }
 
 async function saveW() {
