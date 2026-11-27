@@ -20,6 +20,7 @@ BINANCE_MIN_WITHDRAW_PTS = 1500
 BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
+TASK_REWARD_PTS = 1
 
 ADSTERRA_LINKS = [
     "https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7",
@@ -47,15 +48,21 @@ MONETAG_LINKS = [
     "https://uplcm.com/4/12351479",
 ]
 
-ALL_TASK_ADS = []
-for idx in range(10):
-    ALL_TASK_ADS.append({"provider": "Adsterra", "url": ADSTERRA_LINKS[idx]})
-    ALL_TASK_ADS.append({"provider": "Monetag", "url": MONETAG_LINKS[idx]})
+# Build 100-task ad schedule across 5 sessions x 20 tasks using the 20 Adsterra & Monetag links
+TASK_SCHEDULE_100 = []
+for _idx in range(100):
+    if _idx % 2 == 0:
+        provider = "Adsterra"
+        url = ADSTERRA_LINKS[(_idx // 2) % len(ADSTERRA_LINKS)]
+    else:
+        provider = "Monetag"
+        url = MONETAG_LINKS[(_idx // 2) % len(MONETAG_LINKS)]
+    TASK_SCHEDULE_100.append({"task_index": _idx + 1, "provider": provider, "url": url})
 
 
-def get_task_ad_url(session_num: int, task_num: int) -> str:
-    pos = ((session_num - 1) * 20 + (task_num - 1)) % len(ALL_TASK_ADS)
-    return ALL_TASK_ADS[pos]["url"]
+def get_task_ad_info(session_num: int, task_num: int) -> dict:
+    flat_idx = max(0, min(99, (session_num - 1) * 20 + (task_num - 1)))
+    return TASK_SCHEDULE_100[flat_idx]
 
 
 def now_utc() -> datetime:
@@ -144,6 +151,14 @@ def init_db() -> None:
                 UNIQUE(user_id, session_num)
             );
 
+            CREATE TABLE IF NOT EXISTS completed_tasks (
+                user_id TEXT NOT NULL,
+                session_num INTEGER NOT NULL,
+                task_num INTEGER NOT NULL,
+                completed_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, session_num, task_num)
+            );
+
             CREATE TABLE IF NOT EXISTS active_task_starts (
                 user_id TEXT NOT NULL,
                 session_num INTEGER NOT NULL,
@@ -176,6 +191,7 @@ def init_db() -> None:
                 user_id TEXT PRIMARY KEY,
                 day_key TEXT NOT NULL,
                 spins_used_today INTEGER NOT NULL DEFAULT 0,
+                spin_streak_days INTEGER NOT NULL DEFAULT 0,
                 last_spin_at TEXT DEFAULT '',
                 next_spin_at TEXT DEFAULT ''
             );
@@ -209,6 +225,9 @@ def init_db() -> None:
             );
             """
         )
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(spin_state)").fetchall()]
+        if "spin_streak_days" not in cols:
+            conn.execute("ALTER TABLE spin_state ADD COLUMN spin_streak_days INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     finally:
         conn.close()
@@ -294,8 +313,8 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
 
     conn.execute(
         """
-        INSERT OR IGNORE INTO spin_state (user_id, day_key, spins_used_today, last_spin_at, next_spin_at)
-        VALUES (?, ?, 0, '', '')
+        INSERT OR IGNORE INTO spin_state (user_id, day_key, spins_used_today, spin_streak_days, last_spin_at, next_spin_at)
+        VALUES (?, ?, 0, 0, '', '')
         """,
         (clean_uid, day_key),
     )
@@ -304,12 +323,22 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
     if m_row and m_row["day_key"] != day_key:
         conn.execute("UPDATE mining_state SET day_key = ?, claims_today = 0 WHERE user_id = ?", (day_key, clean_uid))
 
-    s_row = conn.execute("SELECT day_key FROM spin_state WHERE user_id = ?", (clean_uid,)).fetchone()
+    s_row = conn.execute("SELECT day_key, spin_streak_days FROM spin_state WHERE user_id = ?", (clean_uid,)).fetchone()
     if s_row and s_row["day_key"] != day_key:
-        conn.execute("UPDATE spin_state SET day_key = ?, spins_used_today = 0 WHERE user_id = ?", (day_key, clean_uid))
+        prev_dt = parse_iso(s_row["day_key"] + "T00:00:00+00:00")
+        cur_dt_mid = parse_iso(day_key + "T00:00:00+00:00")
+        streak_val = int(s_row["spin_streak_days"] or 0)
+        if prev_dt and cur_dt_mid and (cur_dt_mid - prev_dt).days > 1:
+            streak_val = 0
+        if streak_val >= 7:
+            streak_val = 0
+        conn.execute(
+            "UPDATE spin_state SET day_key = ?, spins_used_today = 0, spin_streak_days = ? WHERE user_id = ?",
+            (day_key, streak_val, clean_uid),
+        )
 
     sess_rows = conn.execute(
-        "SELECT id, is_locked, locked_until FROM task_sessions WHERE user_id = ? AND is_locked = 1",
+        "SELECT id, session_num, is_locked, locked_until FROM task_sessions WHERE user_id = ? AND is_locked = 1",
         (clean_uid,),
     ).fetchall()
     cur_dt = now_utc()
@@ -320,6 +349,18 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
                 "UPDATE task_sessions SET is_locked = 0, locked_until = '', completed_count = 0 WHERE id = ?",
                 (sr["id"],),
             )
+            conn.execute(
+                "DELETE FROM completed_tasks WHERE user_id = ? AND session_num = ?",
+                (clean_uid, int(sr["session_num"])),
+            )
+
+
+def get_unlocked_session(sessions_rows) -> int:
+    # Session 1 is open initially; once completed (locked), the next unlocked session opens sequentially
+    for s in sessions_rows:
+        if int(s["is_locked"]) == 0:
+            return int(s["session_num"])
+    return 1
 
 
 def credit_user_pts(conn: sqlite3.Connection, user_id: str, source_type: str, pts: int, tier3_units: int = 1) -> str:
@@ -362,6 +403,16 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
         "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
         (user_id,),
     ).fetchall()
+    done_rows = conn.execute(
+        "SELECT session_num, task_num FROM completed_tasks WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+
+    done_map = {}
+    for dr in done_rows:
+        done_map.setdefault(int(dr["session_num"]), []).append(int(dr["task_num"]))
+
+    unlocked_sess = get_unlocked_session(sessions)
 
     total_refs = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (user_id,)).fetchone()["c"]
     active_refs = conn.execute(
@@ -389,6 +440,7 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
         "spin": {
             "max_daily": 1,
             "spins_used_today": int(sp["spins_used_today"]),
+            "spin_streak_days": int(sp["spin_streak_days"] or 0),
             "next_spin_at": sp["next_spin_at"] or "",
         },
         "mining": {
@@ -396,12 +448,15 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
             "claims_today": int(m["claims_today"]),
             "next_claim_at": m["next_claim_at"] or "",
         },
+        "unlocked_session": unlocked_sess,
         "task_sessions": [
             {
                 "session_num": int(s["session_num"]),
                 "completed_count": int(s["completed_count"]),
                 "is_locked": bool(s["is_locked"]),
+                "is_unlocked": (int(s["is_locked"]) == 0 and int(s["session_num"]) == unlocked_sess),
                 "locked_until": s["locked_until"] or "",
+                "completed_tasks": sorted(done_map.get(int(s["session_num"]), [])),
             }
             for s in sessions
         ],
@@ -474,11 +529,21 @@ def api_spin():
         slot_label = labels[idx]
         pts_earned = int(pts_vals[idx])
 
+        prev_streak = int(sp["spin_streak_days"] or 0)
+        new_streak = 1 if prev_streak >= 7 else prev_streak + 1
+
         ts = iso_now()
         next_at = (now_utc() + timedelta(hours=24)).isoformat()
         conn.execute(
-            "UPDATE spin_state SET spins_used_today = spins_used_today + 1, last_spin_at = ?, next_spin_at = ? WHERE user_id = ?",
-            (ts, next_at, user_id),
+            """
+            UPDATE spin_state
+            SET spins_used_today = spins_used_today + 1,
+                spin_streak_days = ?,
+                last_spin_at = ?,
+                next_spin_at = ?
+            WHERE user_id = ?
+            """,
+            (new_streak, ts, next_at, user_id),
         )
         if pts_earned > 0:
             credit_user_pts(conn, user_id, "daily_spin", pts_earned, tier3_units=1)
@@ -488,6 +553,7 @@ def api_spin():
             "slot": slot_label,
             "slot_index": idx,
             "pts_earned": pts_earned,
+            "spin_streak_days": new_streak,
             "next_spin_at": next_at,
         })
     finally:
@@ -507,15 +573,25 @@ def api_task_open():
     conn = get_conn()
     try:
         ensure_user(conn, user_id, username)
-        sess = conn.execute(
-            "SELECT * FROM task_sessions WHERE user_id = ? AND session_num = ?",
-            (user_id, s_num),
+        sessions = conn.execute(
+            "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
+            (user_id,),
+        ).fetchall()
+        unlocked_sess = get_unlocked_session(sessions)
+        sess = next((x for x in sessions if int(x["session_num"]) == s_num), None)
+        if not sess or int(sess["is_locked"]) == 1 or s_num != unlocked_sess:
+            return jsonify({"ok": False, "error": f"Session {s_num} is currently locked"}), 400
+
+        already = conn.execute(
+            "SELECT 1 FROM completed_tasks WHERE user_id = ? AND session_num = ? AND task_num = ?",
+            (user_id, s_num, t_num),
         ).fetchone()
-        if int(sess["is_locked"]) == 1:
-            return jsonify({"ok": False, "error": "Session is locked for 2 hours"}), 400
+        if already:
+            return jsonify({"ok": False, "error": "Task already completed"}), 400
 
         ts = iso_now()
-        launch_url = get_task_ad_url(s_num, t_num)
+        ad_info = get_task_ad_info(s_num, t_num)
+        launch_url = ad_info["url"]
         conn.execute(
             """
             INSERT INTO active_task_starts (user_id, session_num, task_num, opened_at, launch_url)
@@ -526,7 +602,13 @@ def api_task_open():
             (user_id, s_num, t_num, ts, launch_url),
         )
         conn.commit()
-        return jsonify({"ok": True, "wait_seconds_min": 8, "wait_seconds_max": 10, "launch_url": launch_url})
+        return jsonify({
+            "ok": True,
+            "wait_seconds_min": 8,
+            "wait_seconds_max": 10,
+            "launch_url": launch_url,
+            "provider": ad_info["provider"],
+        })
     finally:
         conn.close()
 
@@ -542,12 +624,21 @@ def api_task_complete():
     conn = get_conn()
     try:
         ensure_user(conn, user_id, username)
-        sess = conn.execute(
-            "SELECT * FROM task_sessions WHERE user_id = ? AND session_num = ?",
-            (user_id, s_num),
-        ).fetchone()
-        if int(sess["is_locked"]) == 1:
+        sessions = conn.execute(
+            "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
+            (user_id,),
+        ).fetchall()
+        unlocked_sess = get_unlocked_session(sessions)
+        sess = next((x for x in sessions if int(x["session_num"]) == s_num), None)
+        if not sess or int(sess["is_locked"]) == 1 or s_num != unlocked_sess:
             return jsonify({"ok": False, "error": "Session locked"}), 400
+
+        already = conn.execute(
+            "SELECT 1 FROM completed_tasks WHERE user_id = ? AND session_num = ? AND task_num = ?",
+            (user_id, s_num, t_num),
+        ).fetchone()
+        if already:
+            return jsonify({"ok": False, "error": "Task already completed"}), 400
 
         st = conn.execute(
             "SELECT * FROM active_task_starts WHERE user_id = ? AND session_num = ? AND task_num = ?",
@@ -561,21 +652,31 @@ def api_task_complete():
         if elapsed < 8.0:
             return jsonify({"ok": False, "error": f"Wait at least 8-10s ({int(8 - elapsed)}s left)"}), 400
 
+        ts = iso_now()
         conn.execute(
             "DELETE FROM active_task_starts WHERE user_id = ? AND session_num = ? AND task_num = ?",
             (user_id, s_num, t_num),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO completed_tasks (user_id, session_num, task_num, completed_at) VALUES (?, ?, ?, ?)",
+            (user_id, s_num, t_num, ts),
+        )
 
-        new_cnt = int(sess["completed_count"]) + 1
-        reward_pts = 2
-        credit_user_pts(conn, user_id, f"task_s{s_num}_t{t_num}", reward_pts, tier3_units=1)
+        new_cnt = conn.execute(
+            "SELECT COUNT(*) AS c FROM completed_tasks WHERE user_id = ? AND session_num = ?",
+            (user_id, s_num),
+        ).fetchone()["c"]
 
+        credit_user_pts(conn, user_id, f"task_s{s_num}_t{t_num}", TASK_REWARD_PTS, tier3_units=1)
+
+        session_locked_now = False
         if new_cnt >= 20:
             lock_until = (now_utc() + timedelta(hours=2)).isoformat()
             conn.execute(
                 "UPDATE task_sessions SET completed_count = 20, is_locked = 1, locked_until = ? WHERE user_id = ? AND session_num = ?",
                 (lock_until, user_id, s_num),
             )
+            session_locked_now = True
         else:
             conn.execute(
                 "UPDATE task_sessions SET completed_count = ? WHERE user_id = ? AND session_num = ?",
@@ -583,7 +684,12 @@ def api_task_complete():
             )
 
         conn.commit()
-        return jsonify({"ok": True, "pts_earned": reward_pts, "completed_in_session": new_cnt})
+        return jsonify({
+            "ok": True,
+            "pts_earned": TASK_REWARD_PTS,
+            "completed_in_session": int(new_cnt),
+            "session_locked": session_locked_now,
+        })
     finally:
         conn.close()
 
@@ -938,10 +1044,10 @@ MINI_APP_HTML = """<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   body {
-    background: radial-gradient(circle at 50% 6%, #183238 0%, #0b1418 55%, #060a0d 100%);
+    background: radial-gradient(circle at 50% 4%, #1b383f 0%, #0b1418 54%, #05080b 100%);
     color: #f1f5f9;
     min-height: 100vh;
-    padding-bottom: 96px;
+    padding-bottom: 98px;
   }
   .phone-frame { max-width: 430px; margin: 0 auto; padding: 10px 14px 20px; }
   .tg-top {
@@ -952,15 +1058,18 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .tg-badge {
     width: 18px; height: 18px; border-radius: 50%; background: #38bdf8; color: #052230;
     font-size: 11px; font-weight: 900; display: inline-flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 8px rgba(56, 189, 248, 0.45);
   }
   .tg-sub { font-size: 11px; color: #64748b; margin-top: 1px; }
-  .card {
-    background: linear-gradient(180deg, rgba(25, 42, 48, 0.96) 0%, rgba(13, 22, 27, 0.98) 100%);
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 18px;
+
+  .card-3d {
+    background: linear-gradient(175deg, rgba(28, 48, 55, 0.96) 0%, rgba(15, 26, 31, 0.98) 55%, rgba(10, 18, 22, 0.99) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 3px solid rgba(4, 9, 12, 0.9);
+    border-radius: 19px;
     padding: 14px;
     margin-bottom: 11px;
-    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.52), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.58), inset 0 1.5px 0 rgba(255, 255, 255, 0.11);
   }
   .page { display: none; }
   .page.active { display: block; }
@@ -968,46 +1077,57 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .bal-wrap { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .bal-left { display: flex; align-items: center; gap: 12px; }
   .gold-coin {
-    width: 46px; height: 46px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 25%, #fef9c3 0%, #f59e0b 58%, #9a3412 100%);
-    border: 2.5px solid #fde68a;
-    box-shadow: 0 6px 16px rgba(245, 158, 11, 0.36), inset 0 2px 4px rgba(255, 255, 255, 0.7);
+    width: 48px; height: 48px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 24%, #fef9c3 0%, #facc15 36%, #d97706 78%, #78350f 100%);
+    border: 2.5px solid #fef08a;
+    box-shadow: 0 7px 18px rgba(245, 158, 11, 0.42), 0 3px 0 #92400e, inset 0 2px 5px rgba(255, 255, 255, 0.8);
     display: flex; align-items: center; justify-content: center;
-    font-weight: 900; font-size: 19px; color: #78350f; flex-shrink: 0;
+    font-weight: 900; font-size: 20px; color: #78350f; flex-shrink: 0;
   }
   .muted { color: #94a3b8; font-size: 12px; }
   .pts-big { font-size: 27px; font-weight: 800; color: #ffffff; line-height: 1.15; letter-spacing: -0.3px; }
   .boost-btn {
-    background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(52, 211, 153, 0.48);
-    color: #34d399; font-weight: 700; font-size: 12px; padding: 6px 10px; border-radius: 10px;
+    background: linear-gradient(180deg, rgba(16, 185, 129, 0.25), rgba(6, 78, 59, 0.45));
+    border: 1px solid rgba(52, 211, 153, 0.55);
+    border-bottom: 2px solid rgba(4, 120, 87, 0.85);
+    color: #34d399; font-weight: 800; font-size: 12px; padding: 6px 11px; border-radius: 11px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
   }
 
   .day-row { display: flex; align-items: center; justify-content: space-between; }
   .dots-row { display: flex; gap: 6px; }
   .dot-c {
-    width: 22px; height: 22px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800;
+    width: 23px; height: 23px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900;
   }
-  .dot-c.ok { background: #10b981; color: #052e16; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4); }
-  .dot-c.no { background: rgba(148, 163, 184, 0.12); color: #64748b; border: 1px solid rgba(148, 163, 184, 0.22); }
+  .dot-c.ok {
+    background: linear-gradient(180deg, #4ade80, #16a34a);
+    color: #052e16; border: 1px solid #bbf7d0;
+    box-shadow: 0 3px 9px rgba(34, 197, 94, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+  .dot-c.no {
+    background: rgba(15, 23, 42, 0.72); color: #475569;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.55);
+  }
 
   .spin-head { display: flex; justify-content: space-between; align-items: flex-start; }
   .wheel-stage {
-    position: relative; width: 268px; height: 268px;
+    position: relative; width: 274px; height: 274px;
     margin: 14px auto 12px; display: flex; align-items: center; justify-content: center;
   }
   .pointer-top {
-    position: absolute; top: -8px; left: 50%; transform: translateX(-50%); z-index: 12;
+    position: absolute; top: -9px; left: 50%; transform: translateX(-50%); z-index: 12;
     width: 0; height: 0;
-    border-left: 12px solid transparent; border-right: 12px solid transparent;
-    border-top: 23px solid #facc15;
-    filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.75));
+    border-left: 13px solid transparent; border-right: 13px solid transparent;
+    border-top: 24px solid #facc15;
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.8));
   }
   .wheel-bezel {
-    width: 256px; height: 256px; border-radius: 50%; padding: 8px;
-    background: radial-gradient(circle at 30% 25%, #64748b, #0f172a 75%);
-    border: 2px solid rgba(250, 204, 21, 0.65);
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.72), 0 0 24px rgba(250, 204, 21, 0.14);
+    width: 260px; height: 260px; border-radius: 50%; padding: 8px;
+    background: radial-gradient(circle at 30% 22%, #64748b, #1e293b 58%, #090d14 100%);
+    border: 2.5px solid rgba(250, 204, 21, 0.72);
+    box-shadow: 0 16px 32px rgba(0, 0, 0, 0.78), 0 5px 0 #090d14, 0 0 26px rgba(250, 204, 21, 0.16);
     position: relative;
   }
   .wheel-rotor {
@@ -1017,142 +1137,181 @@ MINI_APP_HTML = """<!DOCTYPE html>
   }
   .wheel-svg { width: 100%; height: 100%; display: block; }
   .spin-hub {
-    position: absolute; z-index: 11; width: 68px; height: 68px; border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #475569, #0f172a);
+    position: absolute; z-index: 11; width: 70px; height: 70px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 26%, #475569, #0f172a 78%);
     border: 3px solid #facc15; color: #ffffff; font-weight: 900; font-size: 12px;
     line-height: 1.15; text-align: center; cursor: pointer;
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.75);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.8), 0 3px 0 #78350f, inset 0 1px 2px rgba(255, 255, 255, 0.35);
   }
-  .btn-green {
-    width: 100%; border: none; border-radius: 14px; padding: 13px 16px;
-    background: linear-gradient(180deg, #4ade80 0%, #22c55e 100%);
+  .btn-3d-green {
+    width: 100%; border: 1px solid #86efac; border-bottom: 4px solid #15803d;
+    border-radius: 15px; padding: 13px 16px;
+    background: linear-gradient(180deg, #4ade80 0%, #22c55e 65%, #16a34a 100%);
     color: #052e16; font-weight: 800; font-size: 15px; cursor: pointer;
-    box-shadow: 0 7px 20px rgba(34, 197, 94, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    box-shadow: 0 9px 22px rgba(34, 197, 94, 0.38), inset 0 1.5px 0 rgba(255, 255, 255, 0.6);
+    transition: transform 0.08s ease;
   }
-  .btn-green:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-3d-green:active { transform: translateY(2px); border-bottom-width: 2px; }
+  .btn-3d-green:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .home-link-card {
     display: flex; align-items: center; justify-content: space-between;
-    background: linear-gradient(180deg, rgba(25, 42, 48, 0.94), rgba(13, 22, 27, 0.98));
-    border: 1px solid rgba(148, 163, 184, 0.16); border-radius: 16px;
-    padding: 13px 14px; margin-bottom: 10px; cursor: pointer;
+    background: linear-gradient(175deg, rgba(28, 48, 55, 0.95), rgba(12, 21, 26, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-bottom: 3px solid rgba(5, 10, 14, 0.9);
+    border-radius: 17px; padding: 13px 14px; margin-bottom: 10px; cursor: pointer;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
   .sq-icon {
-    width: 38px; height: 38px; border-radius: 11px;
-    background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.28);
+    width: 40px; height: 40px; border-radius: 12px;
+    background: linear-gradient(180deg, rgba(52, 211, 153, 0.22), rgba(15, 23, 42, 0.85));
+    border: 1px solid rgba(52, 211, 153, 0.35);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
     display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0;
   }
 
   .sess-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px; }
   .sess-pill {
-    background: rgba(16, 27, 32, 0.96); border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 12px; padding: 8px 3px; text-align: center; cursor: pointer;
+    background: linear-gradient(180deg, rgba(24, 39, 46, 0.95), rgba(12, 20, 25, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-bottom: 3px solid rgba(5, 10, 13, 0.9);
+    border-radius: 13px; padding: 8px 3px; text-align: center; cursor: pointer;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.45);
   }
   .sess-pill.active {
-    border: 1.5px solid #34d399;
-    background: linear-gradient(180deg, rgba(16, 185, 129, 0.22), rgba(13, 24, 29, 0.96));
-    box-shadow: 0 0 14px rgba(52, 211, 153, 0.22);
+    border: 1.5px solid #4ade80; border-bottom: 3px solid #15803d;
+    background: linear-gradient(180deg, rgba(22, 101, 52, 0.42), rgba(12, 24, 29, 0.98));
+    box-shadow: 0 0 16px rgba(74, 222, 128, 0.26), 0 6px 14px rgba(0, 0, 0, 0.5);
   }
-  .sess-pill.locked { opacity: 0.72; }
+  .sess-pill.locked { opacity: 0.75; }
   .sess-n { font-size: 11px; font-weight: 800; color: #f8fafc; }
   .sess-st { font-size: 10px; color: #94a3b8; margin-top: 3px; line-height: 1.25; }
-  .sess-pill.active .sess-st { color: #34d399; font-weight: 700; }
+  .sess-pill.active .sess-st { color: #4ade80; font-weight: 700; }
 
-  .row-card {
+  .row-card-3d {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    background: linear-gradient(180deg, rgba(21, 35, 41, 0.96), rgba(12, 21, 25, 0.98));
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 16px; padding: 12px; margin-bottom: 10px;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
+    background: linear-gradient(175deg, rgba(24, 41, 48, 0.96), rgba(12, 21, 26, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-bottom: 3px solid rgba(5, 10, 14, 0.9);
+    border-radius: 17px; padding: 12px; margin-bottom: 10px;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+  .row-card-3d.done-card {
+    border-color: rgba(52, 211, 153, 0.35);
+    background: linear-gradient(175deg, rgba(16, 54, 47, 0.65), rgba(11, 21, 25, 0.98));
   }
   .t-badge-ico {
     width: 44px; height: 44px; border-radius: 13px;
-    background: rgba(25, 42, 48, 0.95); border: 1px solid rgba(148, 163, 184, 0.2);
+    background: linear-gradient(180deg, #1e293b, #0f172a);
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    box-shadow: 0 5px 12px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     display: flex; align-items: center; justify-content: center; font-size: 19px; flex-shrink: 0;
   }
   .wait-badge {
     display: inline-block; margin-top: 5px; font-size: 11px; font-weight: 600;
-    color: #fbbf24; background: rgba(120, 53, 15, 0.36);
-    border: 1px solid rgba(245, 158, 11, 0.34); padding: 3px 8px; border-radius: 8px;
+    color: #fbbf24; background: rgba(120, 53, 15, 0.38);
+    border: 1px solid rgba(245, 158, 11, 0.36); padding: 3px 8px; border-radius: 8px;
   }
-  .open-btn {
-    background: linear-gradient(180deg, #4ade80, #22c55e); color: #052e16;
-    border: none; border-radius: 12px; padding: 9px 14px; font-weight: 800;
+  .done-badge {
+    display: inline-block; margin-top: 5px; font-size: 11px; font-weight: 800;
+    color: #4ade80; background: rgba(20, 83, 45, 0.45);
+    border: 1px solid rgba(74, 222, 128, 0.45); padding: 3px 9px; border-radius: 8px;
+  }
+  .open-btn-3d {
+    background: linear-gradient(180deg, #4ade80, #22c55e);
+    color: #052e16; border: 1px solid #86efac; border-bottom: 3px solid #15803d;
+    border-radius: 12px; padding: 9px 14px; font-weight: 800;
     font-size: 12px; cursor: pointer; white-space: nowrap;
-    box-shadow: 0 4px 12px rgba(34, 197, 94, 0.28);
+    box-shadow: 0 6px 14px rgba(34, 197, 94, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  }
+  .open-btn-3d:active { transform: translateY(1.5px); }
+  .done-btn-3d {
+    background: rgba(22, 101, 52, 0.35); color: #4ade80;
+    border: 1px solid rgba(74, 222, 128, 0.5); border-radius: 12px;
+    padding: 8px 12px; font-weight: 800; font-size: 12px; white-space: nowrap;
   }
   .alert-box {
     background: rgba(120, 53, 15, 0.26); border: 1px solid rgba(245, 158, 11, 0.38);
     color: #fde68a; border-radius: 14px; padding: 11px 12px; font-size: 12px;
     line-height: 1.45; margin-top: 10px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
   }
 
   .m-top-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .m-stat {
-    background: linear-gradient(180deg, rgba(22, 36, 42, 0.95), rgba(12, 21, 25, 0.98));
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 14px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    background: linear-gradient(175deg, rgba(24, 41, 48, 0.96), rgba(12, 21, 26, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-bottom: 3px solid rgba(5, 10, 14, 0.9);
+    border-radius: 15px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
   }
   .coin-pedestal {
-    width: 128px; height: 128px; margin: 4px auto 2px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 24%, #fef9c3 0%, #eab308 58%, #854d0e 100%);
-    border: 4px solid #fde68a;
-    box-shadow: 0 14px 28px rgba(234, 179, 8, 0.32), inset 0 2px 6px rgba(255, 255, 255, 0.65);
+    width: 132px; height: 132px; margin: 4px auto 2px; border-radius: 50%;
+    background: radial-gradient(circle at 28% 22%, #fef9c3 0%, #facc15 42%, #ca8a04 75%, #713f12 100%);
+    border: 4px solid #fef08a;
+    box-shadow: 0 16px 32px rgba(234, 179, 8, 0.36), 0 5px 0 #713f12, inset 0 2px 6px rgba(255, 255, 255, 0.75);
     display: flex; align-items: center; justify-content: center;
   }
   .coin-leaf {
-    width: 96px; height: 96px; border-radius: 50%;
+    width: 98px; height: 98px; border-radius: 50%;
     background: radial-gradient(circle at 32% 28%, #2dd4bf, #0f766e 72%, #064e3b 100%);
-    border: 2px solid rgba(153, 246, 228, 0.45);
-    display: flex; align-items: center; justify-content: center; font-size: 44px;
-    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.45);
+    border: 2px solid rgba(153, 246, 228, 0.5);
+    display: flex; align-items: center; justify-content: center; font-size: 46px;
+    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.5);
   }
   .pedestal-glow {
-    width: 176px; height: 30px; margin: -6px auto 12px; border-radius: 50%;
-    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.62) 0%, rgba(16, 185, 129, 0.14) 65%, transparent 100%);
-    border-top: 2px solid rgba(94, 234, 212, 0.85);
+    width: 184px; height: 32px; margin: -6px auto 12px; border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.68) 0%, rgba(16, 185, 129, 0.16) 65%, transparent 100%);
+    border-top: 2px solid rgba(94, 234, 212, 0.9);
   }
   .active-box {
-    background: rgba(11, 20, 24, 0.96); border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(9, 17, 21, 0.96); border: 1px solid rgba(148, 163, 184, 0.2);
     border-radius: 16px; padding: 12px 14px; margin-bottom: 12px;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.65);
   }
   .active-lbl { font-size: 11px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.7px; }
   .active-clock { font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 2px; }
 
   .g-thumb {
     width: 60px; height: 60px; border-radius: 15px;
-    background: linear-gradient(145deg, #1e293b, #0b1318);
-    border: 1px solid rgba(148, 163, 184, 0.26);
-    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    background: linear-gradient(145deg, #273549, #0b1318);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-bottom: 3px solid #060a0d;
+    box-shadow: 0 7px 15px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     display: flex; align-items: center; justify-content: center; font-size: 27px; flex-shrink: 0;
   }
 
   .pin-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 6px; }
   .pin-box {
-    height: 46px; border-radius: 12px; background: rgba(9, 17, 20, 0.94);
-    border: 1px solid rgba(148, 163, 184, 0.24);
+    height: 46px; border-radius: 12px; background: rgba(9, 17, 20, 0.95);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-bottom: 2px solid rgba(4, 8, 11, 0.9);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.65);
     display: flex; align-items: center; justify-content: center; font-size: 20px; color: #34d399;
     cursor: pointer;
   }
   .pay-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0 12px; }
-  .pay-btn {
-    background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.18);
+  .pay-btn-3d {
+    background: linear-gradient(180deg, rgba(24, 39, 46, 0.95), rgba(12, 21, 26, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.2); border-bottom: 3px solid rgba(5, 10, 14, 0.9);
     color: #cbd5e1; border-radius: 12px; padding: 10px 6px; font-weight: 700; font-size: 13px; cursor: pointer;
+    box-shadow: 0 5px 12px rgba(0, 0, 0, 0.4);
   }
-  .pay-btn.active {
+  .pay-btn-3d.active {
     background: linear-gradient(180deg, #4ade80, #22c55e);
-    color: #052e16; border-color: #86efac;
-    box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+    color: #052e16; border-color: #86efac; border-bottom: 3px solid #15803d;
+    box-shadow: 0 6px 15px rgba(34, 197, 94, 0.35);
   }
   .inp {
-    width: 100%; background: rgba(9, 17, 20, 0.94); border: 1px solid rgba(148, 163, 184, 0.22);
+    width: 100%; background: rgba(9, 17, 20, 0.95); border: 1px solid rgba(148, 163, 184, 0.22);
     color: #ffffff; border-radius: 12px; padding: 11px 12px; font-size: 14px; margin-bottom: 10px;
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
   }
 
   .bnav {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
-    background: rgba(10, 18, 22, 0.98); backdrop-filter: blur(12px);
-    border-top: 1px solid rgba(148, 163, 184, 0.14); padding: 6px 8px 10px;
+    background: rgba(9, 16, 20, 0.98); backdrop-filter: blur(12px);
+    border-top: 1px solid rgba(148, 163, 184, 0.15); padding: 6px 8px 10px;
   }
   .bnav-inner { max-width: 430px; margin: 0 auto; display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
   .bnav-item {
@@ -1160,9 +1319,9 @@ MINI_APP_HTML = """<!DOCTYPE html>
     padding: 6px 2px; cursor: pointer; text-align: center; font-size: 11px; font-weight: 600;
   }
   .bnav-item.active {
-    background: linear-gradient(180deg, #4ade80, #22c55e);
-    color: #052e16; font-weight: 800; border-color: #bbf7d0;
-    box-shadow: 0 0 16px rgba(52, 211, 153, 0.45), 0 4px 12px rgba(34, 197, 94, 0.35);
+    background: linear-gradient(180deg, #4ade80 0%, #22c55e 100%);
+    color: #052e16; font-weight: 800; border-color: #bbf7d0; border-bottom: 3px solid #15803d;
+    box-shadow: 0 0 18px rgba(52, 211, 153, 0.48), 0 5px 14px rgba(34, 197, 94, 0.38);
   }
   .bnav-item span { display: block; font-size: 16px; margin-bottom: 2px; }
   .toast {
@@ -1184,7 +1343,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   </div>
 
   <section class="page active" id="page-home">
-    <div class="card">
+    <div class="card-3d">
       <div class="bal-wrap">
         <div class="bal-left">
           <div class="gold-coin">1</div>
@@ -1197,22 +1356,14 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="card" style="padding:11px 14px;">
+    <div class="card-3d" style="padding:11px 14px;">
       <div class="day-row">
-        <div style="font-weight:700;font-size:14px;">Day 3/7</div>
-        <div class="dots-row">
-          <div class="dot-c ok">✓</div>
-          <div class="dot-c ok">✓</div>
-          <div class="dot-c ok">✓</div>
-          <div class="dot-c no">✓</div>
-          <div class="dot-c no">✓</div>
-          <div class="dot-c no">✓</div>
-          <div class="dot-c no">✓</div>
-        </div>
+        <div style="font-weight:700;font-size:14px;" id="day-streak-lbl">Day 0/7</div>
+        <div class="dots-row" id="day-dots"></div>
       </div>
     </div>
 
-    <div class="card" style="text-align:center;">
+    <div class="card-3d" style="text-align:center;">
       <div class="spin-head">
         <div style="text-align:left;">
           <div style="font-size:16px;font-weight:800;">Daily Spin & Win</div>
@@ -1238,8 +1389,9 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
 
       <div id="spin-msg" style="font-size:13px;font-weight:800;color:#34d399;min-height:18px;margin-bottom:8px;"></div>
-      <button class="btn-green" id="spin-btn" onclick="doSpin()">SPIN NOW</button>
-      <div id="spin-status" class="muted" style="margin-top:10px;">1 Spin Available Today</div>
+      <button class="btn-3d-green" id="spin-btn" onclick="doSpin()">SPIN NOW</button>
+      <div id="spin-countdown" style="font-size:12px;font-weight:700;color:#fbbf24;margin-top:9px;min-height:16px;"></div>
+      <div id="spin-status" class="muted" style="margin-top:4px;">1 Spin Available Today</div>
     </div>
 
     <div class="home-link-card" onclick="goPage('mining')">
@@ -1301,7 +1453,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="card" style="text-align:center;">
+    <div class="card-3d" style="text-align:center;">
       <div class="coin-pedestal"><div class="coin-leaf">🌿</div></div>
       <div class="pedestal-glow"></div>
       <div class="active-box">
@@ -1312,10 +1464,10 @@ MINI_APP_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div class="muted" style="margin-bottom:12px;">Earn 5 to 10 PTS each claim</div>
-      <button class="btn-green" id="m-btn" onclick="doMining()">READY TO CLAIM</button>
+      <button class="btn-3d-green" id="m-btn" onclick="doMining()">READY TO CLAIM</button>
     </div>
 
-    <div class="alert-box" style="background:rgba(28,39,46,0.72);border-color:rgba(148,163,184,0.22);color:#cbd5e1;">
+    <div class="alert-box" style="background:rgba(28,39,46,0.75);border-color:rgba(148,163,184,0.22);color:#cbd5e1;">
       🕒 ২ ঘণ্টা পরপর মাইনিং • দিনে সর্বোচ্চ ৬ বার ক্লেম করা যাবে • পয়েন্ট সরাসরি ওয়ালেটে যোগ হবে
     </div>
   </section>
@@ -1334,24 +1486,24 @@ MINI_APP_HTML = """<!DOCTYPE html>
   </section>
 
   <section class="page" id="page-refer">
-    <div class="card">
+    <div class="card-3d">
       <div style="font-size:18px;font-weight:800;margin-bottom:12px;">Referral Center</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin-bottom:12px;">
-        <div style="background:rgba(9,17,20,0.85);padding:10px;border-radius:12px;">
+        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
           <div style="font-size:18px;font-weight:800;" id="ref-cnt">0</div>
           <div class="muted" style="font-size:11px;">Total Referrals</div>
         </div>
-        <div style="background:rgba(9,17,20,0.85);padding:10px;border-radius:12px;">
+        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
           <div style="font-size:18px;font-weight:800;" id="ref-act">0</div>
           <div class="muted" style="font-size:11px;">Active Referrals</div>
         </div>
-        <div style="background:rgba(9,17,20,0.85);padding:10px;border-radius:12px;">
+        <div style="background:rgba(9,17,20,0.88);padding:10px;border-radius:12px;border:1px solid rgba(148,163,184,0.14);">
           <div style="font-size:18px;font-weight:800;color:#34d399;" id="ref-pts">0</div>
           <div class="muted" style="font-size:11px;">Current Bonus</div>
         </div>
       </div>
       <input class="inp" id="ref-url" readonly />
-      <button class="btn-green" onclick="copyRef()">Copy Referral Link</button>
+      <button class="btn-3d-green" onclick="copyRef()">Copy Referral Link</button>
     </div>
   </section>
 
@@ -1361,7 +1513,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
       <div class="muted" style="margin-top:2px;" id="w-sub">সর্বনিম্ন ১,০০০ PTS হলে উইথড্র নিতে পারবেন</div>
     </div>
 
-    <div class="card" style="text-align:center;">
+    <div class="card-3d" style="text-align:center;">
       <div class="muted" style="margin-bottom:6px;">Available Balance</div>
       <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
         <div class="gold-coin" style="width:36px;height:36px;font-size:15px;">1</div>
@@ -1369,22 +1521,22 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="card" style="padding:12px 14px;">
+    <div class="card-3d" style="padding:12px 14px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div>
           <div style="font-size:13px;font-weight:700;color:#34d399;" id="w-conn">Wallet Not Connected</div>
           <div class="muted" style="font-size:11px;margin-top:2px;" id="w-ver">Connect wallet & set 4-digit PIN</div>
         </div>
-        <button class="pay-btn" style="padding:7px 12px;" onclick="toggleWForm()">Change Wallet</button>
+        <button class="pay-btn-3d" style="padding:7px 12px;" onclick="toggleWForm()">Change Wallet</button>
       </div>
       <div id="w-form" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.14);">
         <input class="inp" id="w-acc" placeholder="Wallet Number / Binance Address" />
         <input class="inp" id="w-pin-set" type="password" maxlength="4" placeholder="Set 4-Digit PIN" />
-        <button class="btn-green" onclick="saveW()">Save Wallet & PIN</button>
+        <button class="btn-3d-green" onclick="saveW()">Save Wallet & PIN</button>
       </div>
     </div>
 
-    <div class="card" style="text-align:center;">
+    <div class="card-3d" style="text-align:center;">
       <div style="font-size:13px;font-weight:700;">Enter 4-Digit PIN to Confirm Withdraw</div>
       <div class="pin-4" onclick="focusPinInput()">
         <div class="pin-box" id="p0">•</div>
@@ -1397,12 +1549,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
         style="opacity:0;position:absolute;pointer-events:none;height:1px;width:1px;" />
     </div>
 
-    <div class="card">
+    <div class="card-3d">
       <div style="font-size:13px;font-weight:700;">Payment Method</div>
       <div class="pay-3">
-        <button class="pay-btn active" id="pm-bKash" onclick="setPay('bKash')">bKash</button>
-        <button class="pay-btn" id="pm-Nagad" onclick="setPay('Nagad')">Nagad</button>
-        <button class="pay-btn" id="pm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
+        <button class="pay-btn-3d active" id="pm-bKash" onclick="setPay('bKash')">bKash</button>
+        <button class="pay-btn-3d" id="pm-Nagad" onclick="setPay('Nagad')">Nagad</button>
+        <button class="pay-btn-3d" id="pm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
       </div>
 
       <div style="font-size:13px;font-weight:700;margin-bottom:6px;" id="w-pts-lbl">Points to Withdraw (Min 1,000)</div>
@@ -1411,7 +1563,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>
         *Binance withdrawals incur standard network fees.
       </div>
-      <button class="btn-green" onclick="reqWithdraw()">
+      <button class="btn-3d-green" onclick="reqWithdraw()">
         Send Withdraw Request
         <div style="font-size:11px;font-weight:600;opacity:0.88;margin-top:1px;">Processing fee applied</div>
       </button>
@@ -1550,6 +1702,32 @@ function fmtTime(iso) {
   return `${h}:${m}:${s}`;
 }
 
+function drawDayTracker(streakDays) {
+  const d = Math.max(0, Math.min(7, parseInt(streakDays || 0, 10)));
+  document.getElementById("day-streak-lbl").textContent = `Day ${d}/7`;
+  const dots = document.getElementById("day-dots");
+  let html = "";
+  for (let i = 1; i <= 7; i++) {
+    const done = i <= d;
+    html += `<div class="dot-c ${done ? "ok" : "no"}">${done ? "✓" : i}</div>`;
+  }
+  dots.innerHTML = html;
+}
+
+function drawSpinClock() {
+  if (!ST) return;
+  const used = ST.spin.spins_used_today;
+  const hasFuture = ST.spin.next_spin_at && new Date() < new Date(ST.spin.next_spin_at);
+  document.getElementById("spin-btn").disabled = used >= ST.spin.max_daily || hasFuture;
+  if (hasFuture) {
+    document.getElementById("spin-countdown").textContent = `Next spin countdown: ${fmtTime(ST.spin.next_spin_at)}`;
+    document.getElementById("spin-status").textContent = "0 Spin Available Today";
+  } else {
+    document.getElementById("spin-countdown").textContent = "";
+    document.getElementById("spin-status").textContent = "1 Spin Available Today";
+  }
+}
+
 function draw() {
   if (!ST) return;
   const b = ST.user.pts_balance;
@@ -1557,11 +1735,8 @@ function draw() {
   document.getElementById("home-bal").textContent = b.toLocaleString() + " PTS";
   document.getElementById("w-bal").textContent = b.toLocaleString() + " PTS";
 
-  const used = ST.spin.spins_used_today;
-  document.getElementById("spin-btn").disabled = used >= ST.spin.max_daily;
-  document.getElementById("spin-status").textContent = used >= ST.spin.max_daily
-    ? `Next free spin in: ${fmtTime(ST.spin.next_spin_at)}`
-    : "1 Spin Available Today";
+  drawDayTracker(ST.spin.spin_streak_days);
+  drawSpinClock();
 
   const clm = ST.mining.claims_today;
   const maxC = ST.mining.max_daily;
@@ -1583,8 +1758,15 @@ function draw() {
     mb.textContent = "READY TO CLAIM";
   }
 
-  const doneS = ST.task_sessions.filter(x => x.completed_count >= 20).length;
+  const doneS = ST.task_sessions.filter(x => x.completed_count >= 20 || x.is_locked).length;
   document.getElementById("home-t-txt").textContent = `${doneS}/5 Completed`;
+
+  if (ST.unlocked_session) {
+    const curSelected = ST.task_sessions.find(x => x.session_num === SESS);
+    if (!curSelected || curSelected.is_locked) {
+      SESS = ST.unlocked_session;
+    }
+  }
 
   drawSessions();
   drawTasks();
@@ -1608,13 +1790,27 @@ function drawSessions() {
   const wrap = document.getElementById("sess-5");
   wrap.innerHTML = "";
   for (const s of ST.task_sessions) {
+    const isOpenSession = !s.is_locked && s.session_num === ST.unlocked_session;
     const el = document.createElement("div");
-    el.className = "sess-pill" + (s.session_num === SESS ? " active" : "") + (s.is_locked ? " locked" : "");
-    el.innerHTML = `
-      <div class="sess-n">Session ${s.session_num}</div>
-      <div class="sess-st">${s.is_locked ? "🔒 Locked<br/>" + fmtTime(s.locked_until) : (s.session_num === SESS ? "● Active<br/>20 Tasks" : s.completed_count + "/20")}</div>
-    `;
-    el.onclick = () => { SESS = s.session_num; drawSessions(); drawTasks(); };
+    el.className = "sess-pill" + (s.session_num === SESS ? " active" : "") + (s.is_locked || !isOpenSession ? " locked" : "");
+    let stHtml = "";
+    if (s.is_locked) {
+      stHtml = `🔒 Locked<br/>${fmtTime(s.locked_until)}`;
+    } else if (isOpenSession) {
+      stHtml = `● Active<br/>${s.completed_count}/20`;
+    } else {
+      stHtml = `🔒 Locked<br/>${s.completed_count}/20`;
+    }
+    el.innerHTML = `<div class="sess-n">Session ${s.session_num}</div><div class="sess-st">${stHtml}</div>`;
+    el.onclick = () => {
+      if (s.is_locked || !isOpenSession) {
+        notify(`Session ${s.session_num} এখনো লক আছে`);
+        return;
+      }
+      SESS = s.session_num;
+      drawSessions();
+      drawTasks();
+    };
     wrap.appendChild(el);
   }
 }
@@ -1622,31 +1818,45 @@ function drawSessions() {
 function drawTasks() {
   const cur = ST.task_sessions.find(x => x.session_num === SESS);
   const done = cur ? cur.completed_count : 0;
+  const doneSet = new Set((cur && cur.completed_tasks) ? cur.completed_tasks : []);
   document.getElementById("sess-title").textContent = `Session ${SESS}: 20 Tasks (${done}/20 Completed)`;
 
   const list = document.getElementById("task-rows");
   list.innerHTML = "";
   if (cur && cur.is_locked) {
-    list.innerHTML = `<div class="card" style="text-align:center;color:#fbbf24;font-size:13px;">
+    list.innerHTML = `<div class="card-3d" style="text-align:center;color:#fbbf24;font-size:13px;">
       Session ${SESS} Locked (${fmtTime(cur.locked_until)} বাকি)
+    </div>`;
+    return;
+  }
+  if (cur && cur.session_num !== ST.unlocked_session) {
+    list.innerHTML = `<div class="card-3d" style="text-align:center;color:#94a3b8;font-size:13px;">
+      আগে Session ${ST.unlocked_session} সম্পন্ন করুন, এরপর Session ${SESS} খুলবে।
     </div>`;
     return;
   }
 
   for (let i = 1; i <= 20; i++) {
-    const ico = i % 2 === 1 ? "🔗" : "🪙";
+    const isDone = doneSet.has(i);
+    const ico = isDone ? "✓" : (i % 2 === 1 ? "🔗" : "🪙");
     const row = document.createElement("div");
-    row.className = "row-card";
+    row.className = "row-card-3d" + (isDone ? " done-card" : "");
     row.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;">
-        <div class="t-badge-ico">${ico}</div>
+        <div class="t-badge-ico" style="${isDone ? "color:#4ade80;border-color:#4ade80;" : ""}">${ico}</div>
         <div>
           <div style="font-weight:700;font-size:14px;">Task ${String(i).padStart(2, "0")}</div>
-          <div style="font-size:12px;color:#34d399;font-weight:700;">Reward: +2 PTS</div>
-          <div class="wait-badge">🕒 8-10s Wait Required</div>
+          <div style="font-size:12px;color:#34d399;font-weight:700;">Reward: +1 PTS</div>
+          ${isDone
+            ? `<div class="done-badge">✓ Completed</div>`
+            : `<div class="wait-badge">🕒 8-10s Wait Required</div>`
+          }
         </div>
       </div>
-      <button class="open-btn" id="ot-${SESS}-${i}" onclick="startTask(${SESS},${i})">Open Task</button>
+      ${isDone
+        ? `<div class="done-btn-3d">✓ Done</div>`
+        : `<button class="open-btn-3d" id="ot-${SESS}-${i}" onclick="startTask(${SESS},${i})">Open Task</button>`
+      }
     `;
     list.appendChild(row);
   }
@@ -1746,7 +1956,7 @@ function drawGames() {
   box.innerHTML = "";
   for (const g of arr) {
     const el = document.createElement("div");
-    el.className = "row-card";
+    el.className = "row-card-3d";
     el.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;">
         <div class="g-thumb">${g.ico}</div>
@@ -1757,7 +1967,7 @@ function drawGames() {
           <div style="font-size:11px;color:#64748b;margin-top:2px;">বিজ্ঞাপন দেখার পর পয়েন্ট অ্যাকাউন্টে যোগ হবে</div>
         </div>
       </div>
-      <button class="open-btn" onclick="runGame('${g.title}',${g.pts})">Play Fullscreen</button>
+      <button class="open-btn-3d" onclick="runGame('${g.title}',${g.pts})">Play Fullscreen</button>
     `;
     box.appendChild(el);
   }
@@ -1845,13 +2055,14 @@ async function loadApp() {
 }
 
 setInterval(() => {
-  if (ST) {
-    const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
-    if (activeM) {
-      document.getElementById("m-clock").textContent = fmtTime(ST.mining.next_claim_at);
-      document.getElementById("home-m-txt").textContent = `${fmtTime(ST.mining.next_claim_at)} left`;
-    }
+  if (!ST) return;
+  drawSpinClock();
+  const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
+  if (activeM) {
+    document.getElementById("m-clock").textContent = fmtTime(ST.mining.next_claim_at);
+    document.getElementById("home-m-txt").textContent = `${fmtTime(ST.mining.next_claim_at)} left`;
   }
+  drawSessions();
 }, 1000);
 
 loadApp();
