@@ -1,10 +1,8 @@
 import hashlib
 import hmac
-import json
 import os
 import random
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +12,7 @@ app = Flask(__name__)
 
 DB_PATH = os.environ.get("TAPMINT_DB_PATH", "tapmint.db")
 ADMIN_KEY = os.environ.get("TAPMINT_ADMIN_KEY", "TAPMINT_ADMIN_99")
-MASTER_REF = os.environ.get("TAPMINT_MASTER_REF", "TAPMINT_MASTER_99")
+MASTER_REF = os.environ.get("TAPMINT_MASTER_REF", "ref_tapmint99bot")
 SECRET_SALT = os.environ.get("TAPMINT_SECRET_SALT", "tapmint_secret_salt_2026")
 
 GENERAL_MIN_WITHDRAW_PTS = 1000
@@ -22,6 +20,42 @@ BINANCE_MIN_WITHDRAW_PTS = 1500
 BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
+
+ADSTERRA_LINKS = [
+    "https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7",
+    "https://asiafilm.org/4/3bd5bca9029900a8d0d2bb526ebd7214",
+    "https://asiafilm.org/4/224868d40ac462d276354c5696553960",
+    "https://asiafilm.org/4/2a16c7d7870cf593884b4976629a6156",
+    "https://asiafilm.org/4/4f3af0df8bb071b2232440532691af67",
+    "https://asiafilm.org/4/5909d9fd3d02125d0447b6d1702377d7",
+    "https://asiafilm.org/4/c75201a3ea80e241a6008c8f503e0855",
+    "https://asiafilm.org/4/9b1be208097bfdbce8298db933df0875",
+    "https://asiafilm.org/4/5bac8f36e93727dc1e10c13f28ad12ba",
+    "https://asiafilm.org/4/948938a94d72df36b23ba9f97ef3bfff",
+]
+
+MONETAG_LINKS = [
+    "https://uplcm.com/4/12351466",
+    "https://uplcm.com/4/12351467",
+    "https://uplcm.com/4/12351468",
+    "https://uplcm.com/4/12351473",
+    "https://uplcm.com/4/12351474",
+    "https://uplcm.com/4/12351475",
+    "https://uplcm.com/4/12351476",
+    "https://uplcm.com/4/12351477",
+    "https://uplcm.com/4/12351478",
+    "https://uplcm.com/4/12351479",
+]
+
+ALL_TASK_ADS = []
+for idx in range(10):
+    ALL_TASK_ADS.append({"provider": "Adsterra", "url": ADSTERRA_LINKS[idx]})
+    ALL_TASK_ADS.append({"provider": "Monetag", "url": MONETAG_LINKS[idx]})
+
+
+def get_task_ad_url(session_num: int, task_num: int) -> str:
+    pos = ((session_num - 1) * 20 + (task_num - 1)) % len(ALL_TASK_ADS)
+    return ALL_TASK_ADS[pos]["url"]
 
 
 def now_utc() -> datetime:
@@ -181,7 +215,6 @@ def init_db() -> None:
 
 
 def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
-    # Zero initial reserve funds; computed strictly from ledger net inflows minus approved outflows
     row = conn.execute(
         """
         SELECT COALESCE(SUM(
@@ -267,7 +300,6 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
         (clean_uid, day_key),
     )
 
-    # Roll daily counters if UTC date changed
     m_row = conn.execute("SELECT day_key FROM mining_state WHERE user_id = ?", (clean_uid,)).fetchone()
     if m_row and m_row["day_key"] != day_key:
         conn.execute("UPDATE mining_state SET day_key = ?, claims_today = 0 WHERE user_id = ?", (day_key, clean_uid))
@@ -276,7 +308,6 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
     if s_row and s_row["day_key"] != day_key:
         conn.execute("UPDATE spin_state SET day_key = ?, spins_used_today = 0 WHERE user_id = ?", (day_key, clean_uid))
 
-    # Release expired 2-hour task session locks
     sess_rows = conn.execute(
         "SELECT id, is_locked, locked_until FROM task_sessions WHERE user_id = ? AND is_locked = 1",
         (clean_uid,),
@@ -427,22 +458,22 @@ def api_spin():
         if int(sp["spins_used_today"]) >= 1:
             return jsonify({"ok": False, "error": "Daily spin already used today"}), 400
 
-        # Max 15 PTS, low odds on top rewards
+        # Exact wheel slots: 1, 3, 4, 6, 8, 10, and Try Again
         outcomes = [
-            ("1 PTS", 1, 28),
-            ("2 PTS", 2, 26),
-            ("5 PTS", 5, 18),
-            ("Bonus", 3, 12),
-            ("Try Again", 0, 10),
+            ("1 PTS", 1, 26),
+            ("3 PTS", 3, 22),
+            ("4 PTS", 4, 18),
+            ("6 PTS", 6, 12),
+            ("8 PTS", 8, 7),
             ("10 PTS", 10, 4),
-            ("15 PTS", 15, 2),
+            ("Try Again", 0, 11),
         ]
         labels = [x[0] for x in outcomes]
         pts_vals = [x[1] for x in outcomes]
         weights = [x[2] for x in outcomes]
         idx = random.choices(range(len(outcomes)), weights=weights, k=1)[0]
         slot_label = labels[idx]
-        pts_earned = pts_vals[idx]
+        pts_earned = int(pts_vals[idx])
 
         ts = iso_now()
         next_at = (now_utc() + timedelta(hours=24)).isoformat()
@@ -453,7 +484,13 @@ def api_spin():
         if pts_earned > 0:
             credit_user_pts(conn, user_id, "daily_spin", pts_earned, tier3_units=1)
         conn.commit()
-        return jsonify({"ok": True, "slot": slot_label, "pts_earned": pts_earned, "next_spin_at": next_at})
+        return jsonify({
+            "ok": True,
+            "slot": slot_label,
+            "slot_index": idx,
+            "pts_earned": pts_earned,
+            "next_spin_at": next_at,
+        })
     finally:
         conn.close()
 
@@ -479,7 +516,7 @@ def api_task_open():
             return jsonify({"ok": False, "error": "Session is locked for 2 hours"}), 400
 
         ts = iso_now()
-        launch_url = f"https://example.com/tapmint-task?s={s_num}&t={t_num}&u={user_id}"
+        launch_url = get_task_ad_url(s_num, t_num)
         conn.execute(
             """
             INSERT INTO active_task_starts (user_id, session_num, task_num, opened_at, launch_url)
@@ -569,7 +606,6 @@ def api_mining_claim():
         if next_dt and now_utc() < next_dt:
             return jsonify({"ok": False, "error": "Mining cooldown active (every 2 hours)"}), 400
 
-        # 5 to 10 PTS with heavier weight on 5-7 PTS
         pts_earned = random.choices([5, 6, 7, 8, 9, 10], weights=[32, 30, 20, 9, 5, 4], k=1)[0]
         ts = iso_now()
         next_claim_at = (now_utc() + timedelta(hours=2)).isoformat()
@@ -854,7 +890,6 @@ def api_admin_withdraw_review():
             conn.commit()
             return jsonify({"ok": True, "withdraw_id": wid, "status": "rejected"})
 
-        # Approve: automatically log fee inflow + approved payout outflow in নোট খাতা
         conn.execute(
             "UPDATE withdrawals SET status = 'approved', reviewed_at = ? WHERE id = ?",
             (ts, wid),
@@ -958,14 +993,14 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .dot-c.no { background: rgba(148, 163, 184, 0.14); color: #64748b; border: 1px solid rgba(148, 163, 184, 0.22); }
 
   .spin-head { display: flex; justify-content: space-between; align-items: flex-start; }
-  .wheel-stage { position: relative; width: 248px; height: 248px; margin: 12px auto 12px; display: flex; align-items: center; justify-content: center; }
+  .wheel-stage { position: relative; width: 256px; height: 256px; margin: 12px auto 12px; display: flex; align-items: center; justify-content: center; }
   .pointer-top {
     position: absolute; top: -6px; left: 50%; transform: translateX(-50%); z-index: 8;
     width: 0; height: 0; border-left: 11px solid transparent; border-right: 11px solid transparent;
     border-top: 21px solid #facc15; filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.65));
   }
   .wheel-rim {
-    width: 238px; height: 238px; border-radius: 50%; padding: 7px;
+    width: 244px; height: 244px; border-radius: 50%; padding: 7px;
     background: radial-gradient(circle at 30% 25%, #475569, #0f172a);
     border: 2px solid rgba(250, 204, 21, 0.45);
     box-shadow: 0 12px 26px rgba(0, 0, 0, 0.65);
@@ -974,13 +1009,13 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .wheel-rotor {
     width: 100%; height: 100%; border-radius: 50%; position: relative;
     background: conic-gradient(
-      #10b981 0deg 51.4deg,
-      #eab308 51.4deg 102.8deg,
-      #f97316 102.8deg 154.2deg,
-      #06b6d4 154.2deg 205.6deg,
-      #22c55e 205.6deg 257deg,
-      #ec4899 257deg 308.4deg,
-      #8b5cf6 308.4deg 360deg
+      #10b981 0deg 51.428deg,
+      #eab308 51.428deg 102.857deg,
+      #f97316 102.857deg 154.285deg,
+      #06b6d4 154.285deg 205.714deg,
+      #22c55e 205.714deg 257.142deg,
+      #ec4899 257.142deg 308.571deg,
+      #8b5cf6 308.571deg 360deg
     );
     transition: transform 2.5s cubic-bezier(0.16, 0.88, 0.22, 1);
     overflow: hidden;
@@ -989,13 +1024,13 @@ MINI_APP_HTML = """<!DOCTYPE html>
     position: absolute; left: 50%; top: 50%;
     transform-origin: 0 0;
     font-size: 11px; font-weight: 800; color: #ffffff;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
     white-space: nowrap; pointer-events: none;
   }
   .spin-hub {
-    position: absolute; z-index: 9; width: 68px; height: 68px; border-radius: 50%;
+    position: absolute; z-index: 9; width: 66px; height: 66px; border-radius: 50%;
     background: radial-gradient(circle at 35% 30%, #334155, #0f172a);
-    border: 3px solid #facc15; color: #ffffff; font-weight: 900; font-size: 13px;
+    border: 3px solid #facc15; color: #ffffff; font-weight: 900; font-size: 12px;
     line-height: 1.15; text-align: center; cursor: pointer;
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.7);
   }
@@ -1170,11 +1205,11 @@ MINI_APP_HTML = """<!DOCTYPE html>
       <div class="spin-head">
         <div style="text-align:left;">
           <div style="font-size:16px;font-weight:800;">Daily Spin & Win</div>
-          <div class="muted" style="margin-top:2px;">ডেইলি স্পিন হুইল • সর্বোচ্চ ১৫ PTS</div>
+          <div class="muted" style="margin-top:2px;">ডেইলি স্পিন হুইল • সর্বোচ্চ ১০ PTS</div>
         </div>
         <div style="text-align:right;">
           <div class="muted" style="font-size:11px;">Max Reward:</div>
-          <div style="font-size:14px;font-weight:800;color:#fbbf24;">15 PTS</div>
+          <div style="font-size:14px;font-weight:800;color:#fbbf24;">10 PTS</div>
         </div>
       </div>
 
@@ -1183,12 +1218,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
         <div class="wheel-rim">
           <div class="wheel-rotor" id="wheel-rotor">
             <div class="slice-lbl" style="transform: rotate(-64deg) translate(56px, -6px);">1 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(-13deg) translate(56px, -6px);">2 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(38deg) translate(54px, -6px);">5 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(90deg) translate(50px, -6px);">10 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(141deg) translate(46px, -6px);">15 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(192deg) translate(42px, -6px);">Bonus</div>
-            <div class="slice-lbl" style="transform: rotate(244deg) translate(38px, -6px);">Try Again</div>
+            <div class="slice-lbl" style="transform: rotate(-13deg) translate(56px, -6px);">3 PTS</div>
+            <div class="slice-lbl" style="transform: rotate(38deg) translate(54px, -6px);">4 PTS</div>
+            <div class="slice-lbl" style="transform: rotate(90deg) translate(50px, -6px);">6 PTS</div>
+            <div class="slice-lbl" style="transform: rotate(141deg) translate(46px, -6px);">8 PTS</div>
+            <div class="slice-lbl" style="transform: rotate(192deg) translate(42px, -6px);">10 PTS</div>
+            <div class="slice-lbl" style="transform: rotate(244deg) translate(34px, -6px);">Try Again</div>
           </div>
         </div>
         <button class="spin-hub" onclick="doSpin()">SPIN<br/>NOW</button>
@@ -1312,7 +1347,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   <section class="page" id="page-wallet">
     <div style="margin-bottom:12px;">
       <div style="font-size:20px;font-weight:800;">Wallet & Withdraw</div>
-      <div class="muted" style="margin-top:2px;" id="w-sub">সর্বনিম্ন উইথড্র পয়েন্ট হলে উইথড্র নিতে পারবেন</div>
+      <div class="muted" style="margin-top:2px;" id="w-sub">সর্বনিম্ন ১,০০০ PTS হলে উইথড্র নিতে পারবেন</div>
     </div>
 
     <div class="card" style="text-align:center;">
@@ -1358,7 +1393,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         <button class="pay-btn" id="pm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
       </div>
 
-      <div style="font-size:13px;font-weight:700;margin-bottom:6px;" id="w-pts-lbl">Points to Withdraw</div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px;" id="w-pts-lbl">Points to Withdraw (Min 1,000)</div>
       <input class="inp" id="w-pts-val" type="number" placeholder="1,000" />
       <div class="muted" style="font-size:11px;line-height:1.45;margin-bottom:12px;" id="w-fee-txt">
         উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>
@@ -1432,13 +1467,13 @@ function setPay(m) {
 function syncWCopy() {
   if (!ST) return;
   const wr = ST.withdraw_rules;
-  document.getElementById("w-sub").textContent = `সর্বনিম্ন ${wr.general_min_pts} PTS হলে উইথড্র নিতে পারবেন`;
+  document.getElementById("w-sub").textContent = `সর্বনিম্ন ${wr.general_min_pts.toLocaleString()} PTS হলে উইথড্র নিতে পারবেন`;
   if (PAY === "Binance USDT") {
-    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.binance_min_pts} PTS)`;
+    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.binance_min_pts.toLocaleString()})`;
     document.getElementById("w-fee-txt").innerHTML =
       `উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>*Binance USDT minimum $${wr.binance_min_usdt_rule} equivalent & standard network fees apply.`;
   } else {
-    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.general_min_pts})`;
+    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.general_min_pts.toLocaleString()})`;
     document.getElementById("w-fee-txt").innerHTML =
       `উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>*Binance withdrawals incur standard network fees.`;
   }
@@ -1568,7 +1603,9 @@ async function startTask(sNum, tNum) {
     btn.disabled = false;
     return;
   }
-  if (op.launch_url) window.open(op.launch_url, "_blank", "noopener,noreferrer");
+  if (op.launch_url) {
+    window.open(op.launch_url, "_blank", "noopener,noreferrer");
+  }
   let left = 9;
   btn.textContent = `${left}s`;
   const iv = setInterval(async () => {
@@ -1603,11 +1640,21 @@ async function doSpin() {
   }).then(x => x.json());
   if (!r.ok) return notify(r.error || "Spin not ready");
 
-  DEG += 1080 + Math.floor(Math.random() * 280);
+  const sliceDeg = 360 / 7;
+  const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
+  const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
+  const baseMod = ((DEG % 360) + 360) % 360;
+  const desiredMod = (360 - targetCenter) % 360;
+  const deltaMod = (desiredMod - baseMod + 360) % 360;
+  DEG += 1080 + deltaMod;
+
   document.getElementById("wheel-rotor").style.transform = `rotate(${DEG}deg)`;
-  document.getElementById("spin-msg").textContent = `${r.slot} (+${r.pts_earned} PTS)`;
+  document.getElementById("spin-msg").textContent = r.pts_earned > 0
+    ? `${r.slot} (+${r.pts_earned} PTS)`
+    : "Try Again (+0 PTS)";
+
   setTimeout(async () => {
-    notify(`+${r.pts_earned} PTS added!`);
+    notify(r.pts_earned > 0 ? `+${r.pts_earned} PTS added!` : "Try Again today!");
     await loadApp();
   }, 2500);
 }
