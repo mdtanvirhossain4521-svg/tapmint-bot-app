@@ -458,7 +458,6 @@ def api_spin():
         if int(sp["spins_used_today"]) >= 1:
             return jsonify({"ok": False, "error": "Daily spin already used today"}), 400
 
-        # Exact wheel slots: 1, 3, 4, 6, 8, 10, and Try Again
         outcomes = [
             ("1 PTS", 1, 26),
             ("3 PTS", 3, 22),
@@ -939,10 +938,10 @@ MINI_APP_HTML = """<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   body {
-    background: radial-gradient(circle at 50% 8%, #152b30 0%, #091114 58%, #05090b 100%);
+    background: radial-gradient(circle at 50% 6%, #183238 0%, #0b1418 55%, #060a0d 100%);
     color: #f1f5f9;
     min-height: 100vh;
-    padding-bottom: 94px;
+    padding-bottom: 96px;
   }
   .phone-frame { max-width: 430px; margin: 0 auto; padding: 10px 14px 20px; }
   .tg-top {
@@ -951,17 +950,17 @@ MINI_APP_HTML = """<!DOCTYPE html>
   }
   .tg-brand { font-size: 19px; font-weight: 800; color: #f8fafc; display: flex; align-items: center; gap: 6px; }
   .tg-badge {
-    width: 17px; height: 17px; border-radius: 50%; background: #38bdf8; color: #062230;
+    width: 18px; height: 18px; border-radius: 50%; background: #38bdf8; color: #052230;
     font-size: 11px; font-weight: 900; display: inline-flex; align-items: center; justify-content: center;
   }
   .tg-sub { font-size: 11px; color: #64748b; margin-top: 1px; }
   .card {
-    background: linear-gradient(180deg, rgba(23, 38, 44, 0.94) 0%, rgba(12, 21, 25, 0.97) 100%);
-    border: 1px solid rgba(148, 163, 184, 0.15);
+    background: linear-gradient(180deg, rgba(25, 42, 48, 0.96) 0%, rgba(13, 22, 27, 0.98) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.16);
     border-radius: 18px;
     padding: 14px;
     margin-bottom: 11px;
-    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.52), inset 0 1px 0 rgba(255, 255, 255, 0.07);
   }
   .page { display: none; }
   .page.active { display: block; }
@@ -969,97 +968,91 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .bal-wrap { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .bal-left { display: flex; align-items: center; gap: 12px; }
   .gold-coin {
-    width: 44px; height: 44px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 28%, #fef08a 0%, #f59e0b 55%, #b45309 100%);
-    border: 2px solid #fde68a;
-    box-shadow: 0 5px 14px rgba(245, 158, 11, 0.35), inset 0 2px 4px rgba(255, 255, 255, 0.65);
+    width: 46px; height: 46px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 25%, #fef9c3 0%, #f59e0b 58%, #9a3412 100%);
+    border: 2.5px solid #fde68a;
+    box-shadow: 0 6px 16px rgba(245, 158, 11, 0.36), inset 0 2px 4px rgba(255, 255, 255, 0.7);
     display: flex; align-items: center; justify-content: center;
-    font-weight: 900; font-size: 18px; color: #78350f; flex-shrink: 0;
+    font-weight: 900; font-size: 19px; color: #78350f; flex-shrink: 0;
   }
   .muted { color: #94a3b8; font-size: 12px; }
-  .pts-big { font-size: 26px; font-weight: 800; color: #ffffff; line-height: 1.15; }
+  .pts-big { font-size: 27px; font-weight: 800; color: #ffffff; line-height: 1.15; letter-spacing: -0.3px; }
   .boost-btn {
-    background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(52, 211, 153, 0.45);
+    background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(52, 211, 153, 0.48);
     color: #34d399; font-weight: 700; font-size: 12px; padding: 6px 10px; border-radius: 10px;
   }
 
   .day-row { display: flex; align-items: center; justify-content: space-between; }
-  .dots-row { display: flex; gap: 7px; }
+  .dots-row { display: flex; gap: 6px; }
   .dot-c {
     width: 22px; height: 22px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800;
   }
-  .dot-c.ok { background: #10b981; color: #052e16; }
-  .dot-c.no { background: rgba(148, 163, 184, 0.14); color: #64748b; border: 1px solid rgba(148, 163, 184, 0.22); }
+  .dot-c.ok { background: #10b981; color: #052e16; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4); }
+  .dot-c.no { background: rgba(148, 163, 184, 0.12); color: #64748b; border: 1px solid rgba(148, 163, 184, 0.22); }
 
   .spin-head { display: flex; justify-content: space-between; align-items: flex-start; }
-  .wheel-stage { position: relative; width: 256px; height: 256px; margin: 12px auto 12px; display: flex; align-items: center; justify-content: center; }
-  .pointer-top {
-    position: absolute; top: -6px; left: 50%; transform: translateX(-50%); z-index: 8;
-    width: 0; height: 0; border-left: 11px solid transparent; border-right: 11px solid transparent;
-    border-top: 21px solid #facc15; filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.65));
+  .wheel-stage {
+    position: relative; width: 268px; height: 268px;
+    margin: 14px auto 12px; display: flex; align-items: center; justify-content: center;
   }
-  .wheel-rim {
-    width: 244px; height: 244px; border-radius: 50%; padding: 7px;
-    background: radial-gradient(circle at 30% 25%, #475569, #0f172a);
-    border: 2px solid rgba(250, 204, 21, 0.45);
-    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.65);
+  .pointer-top {
+    position: absolute; top: -8px; left: 50%; transform: translateX(-50%); z-index: 12;
+    width: 0; height: 0;
+    border-left: 12px solid transparent; border-right: 12px solid transparent;
+    border-top: 23px solid #facc15;
+    filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.75));
+  }
+  .wheel-bezel {
+    width: 256px; height: 256px; border-radius: 50%; padding: 8px;
+    background: radial-gradient(circle at 30% 25%, #64748b, #0f172a 75%);
+    border: 2px solid rgba(250, 204, 21, 0.65);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.72), 0 0 24px rgba(250, 204, 21, 0.14);
     position: relative;
   }
   .wheel-rotor {
     width: 100%; height: 100%; border-radius: 50%; position: relative;
-    background: conic-gradient(
-      #10b981 0deg 51.428deg,
-      #eab308 51.428deg 102.857deg,
-      #f97316 102.857deg 154.285deg,
-      #06b6d4 154.285deg 205.714deg,
-      #22c55e 205.714deg 257.142deg,
-      #ec4899 257.142deg 308.571deg,
-      #8b5cf6 308.571deg 360deg
-    );
     transition: transform 2.5s cubic-bezier(0.16, 0.88, 0.22, 1);
     overflow: hidden;
   }
-  .slice-lbl {
-    position: absolute; left: 50%; top: 50%;
-    transform-origin: 0 0;
-    font-size: 11px; font-weight: 800; color: #ffffff;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
-    white-space: nowrap; pointer-events: none;
-  }
+  .wheel-svg { width: 100%; height: 100%; display: block; }
   .spin-hub {
-    position: absolute; z-index: 9; width: 66px; height: 66px; border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #334155, #0f172a);
+    position: absolute; z-index: 11; width: 68px; height: 68px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #475569, #0f172a);
     border: 3px solid #facc15; color: #ffffff; font-weight: 900; font-size: 12px;
     line-height: 1.15; text-align: center; cursor: pointer;
-    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.7);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.75);
   }
   .btn-green {
     width: 100%; border: none; border-radius: 14px; padding: 13px 16px;
     background: linear-gradient(180deg, #4ade80 0%, #22c55e 100%);
     color: #052e16; font-weight: 800; font-size: 15px; cursor: pointer;
-    box-shadow: 0 6px 18px rgba(34, 197, 94, 0.28);
+    box-shadow: 0 7px 20px rgba(34, 197, 94, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.45);
   }
   .btn-green:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .home-link-card {
     display: flex; align-items: center; justify-content: space-between;
-    background: linear-gradient(180deg, rgba(23, 38, 44, 0.92), rgba(12, 21, 25, 0.97));
-    border: 1px solid rgba(148, 163, 184, 0.15); border-radius: 16px;
+    background: linear-gradient(180deg, rgba(25, 42, 48, 0.94), rgba(13, 22, 27, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.16); border-radius: 16px;
     padding: 13px 14px; margin-bottom: 10px; cursor: pointer;
   }
   .sq-icon {
-    width: 36px; height: 36px; border-radius: 11px;
-    background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.26);
-    display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
+    width: 38px; height: 38px; border-radius: 11px;
+    background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.28);
+    display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0;
   }
 
   .sess-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px; }
   .sess-pill {
-    background: rgba(15, 25, 29, 0.95); border: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(16, 27, 32, 0.96); border: 1px solid rgba(148, 163, 184, 0.16);
     border-radius: 12px; padding: 8px 3px; text-align: center; cursor: pointer;
   }
-  .sess-pill.active { border-color: #34d399; background: rgba(16, 185, 129, 0.14); }
+  .sess-pill.active {
+    border: 1.5px solid #34d399;
+    background: linear-gradient(180deg, rgba(16, 185, 129, 0.22), rgba(13, 24, 29, 0.96));
+    box-shadow: 0 0 14px rgba(52, 211, 153, 0.22);
+  }
   .sess-pill.locked { opacity: 0.72; }
   .sess-n { font-size: 11px; font-weight: 800; color: #f8fafc; }
   .sess-st { font-size: 10px; color: #94a3b8; margin-top: 3px; line-height: 1.25; }
@@ -1067,91 +1060,109 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
   .row-card {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.15);
+    background: linear-gradient(180deg, rgba(21, 35, 41, 0.96), rgba(12, 21, 25, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.16);
     border-radius: 16px; padding: 12px; margin-bottom: 10px;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
+  }
+  .t-badge-ico {
+    width: 44px; height: 44px; border-radius: 13px;
+    background: rgba(25, 42, 48, 0.95); border: 1px solid rgba(148, 163, 184, 0.2);
+    display: flex; align-items: center; justify-content: center; font-size: 19px; flex-shrink: 0;
   }
   .wait-badge {
     display: inline-block; margin-top: 5px; font-size: 11px; font-weight: 600;
-    color: #fbbf24; background: rgba(245, 158, 11, 0.14);
-    border: 1px solid rgba(245, 158, 11, 0.28); padding: 3px 8px; border-radius: 8px;
+    color: #fbbf24; background: rgba(120, 53, 15, 0.36);
+    border: 1px solid rgba(245, 158, 11, 0.34); padding: 3px 8px; border-radius: 8px;
   }
   .open-btn {
     background: linear-gradient(180deg, #4ade80, #22c55e); color: #052e16;
     border: none; border-radius: 12px; padding: 9px 14px; font-weight: 800;
     font-size: 12px; cursor: pointer; white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(34, 197, 94, 0.28);
   }
   .alert-box {
-    background: rgba(120, 53, 15, 0.28); border: 1px solid rgba(245, 158, 11, 0.36);
+    background: rgba(120, 53, 15, 0.26); border: 1px solid rgba(245, 158, 11, 0.38);
     color: #fde68a; border-radius: 14px; padding: 11px 12px; font-size: 12px;
     line-height: 1.45; margin-top: 10px;
   }
 
   .m-top-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .m-stat {
-    background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.15);
+    background: linear-gradient(180deg, rgba(22, 36, 42, 0.95), rgba(12, 21, 25, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.16);
     border-radius: 14px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
   }
   .coin-pedestal {
-    width: 118px; height: 118px; margin: 4px auto 4px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 25%, #fef08a 0%, #eab308 58%, #92400e 100%);
-    border: 4px solid #fde68a; box-shadow: 0 12px 26px rgba(234, 179, 8, 0.28);
+    width: 128px; height: 128px; margin: 4px auto 2px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 24%, #fef9c3 0%, #eab308 58%, #854d0e 100%);
+    border: 4px solid #fde68a;
+    box-shadow: 0 14px 28px rgba(234, 179, 8, 0.32), inset 0 2px 6px rgba(255, 255, 255, 0.65);
     display: flex; align-items: center; justify-content: center;
   }
   .coin-leaf {
-    width: 88px; height: 88px; border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #34d399, #0f766e);
-    display: flex; align-items: center; justify-content: center; font-size: 40px;
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
+    width: 96px; height: 96px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #2dd4bf, #0f766e 72%, #064e3b 100%);
+    border: 2px solid rgba(153, 246, 228, 0.45);
+    display: flex; align-items: center; justify-content: center; font-size: 44px;
+    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.45);
   }
   .pedestal-glow {
-    width: 164px; height: 28px; margin: -6px auto 12px; border-radius: 50%;
-    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.55) 0%, rgba(16, 185, 129, 0.12) 65%, transparent 100%);
-    border-top: 2px solid rgba(94, 234, 212, 0.75);
+    width: 176px; height: 30px; margin: -6px auto 12px; border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.62) 0%, rgba(16, 185, 129, 0.14) 65%, transparent 100%);
+    border-top: 2px solid rgba(94, 234, 212, 0.85);
   }
   .active-box {
-    background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.16);
-    border-radius: 16px; padding: 12px; margin-bottom: 12px;
+    background: rgba(11, 20, 24, 0.96); border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 16px; padding: 12px 14px; margin-bottom: 12px;
   }
-  .active-lbl { font-size: 11px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.6px; }
+  .active-lbl { font-size: 11px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.7px; }
   .active-clock { font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 2px; }
 
-  .g-icon {
-    width: 56px; height: 56px; border-radius: 14px;
-    background: linear-gradient(145deg, #1e293b, #0f172a);
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    display: flex; align-items: center; justify-content: center; font-size: 25px; flex-shrink: 0;
+  .g-thumb {
+    width: 60px; height: 60px; border-radius: 15px;
+    background: linear-gradient(145deg, #1e293b, #0b1318);
+    border: 1px solid rgba(148, 163, 184, 0.26);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    display: flex; align-items: center; justify-content: center; font-size: 27px; flex-shrink: 0;
   }
 
   .pin-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 6px; }
   .pin-box {
-    height: 44px; border-radius: 12px; background: rgba(9, 17, 20, 0.92);
+    height: 46px; border-radius: 12px; background: rgba(9, 17, 20, 0.94);
     border: 1px solid rgba(148, 163, 184, 0.24);
     display: flex; align-items: center; justify-content: center; font-size: 20px; color: #34d399;
+    cursor: pointer;
   }
   .pay-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0 12px; }
   .pay-btn {
-    background: rgba(15, 25, 29, 0.92); border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.18);
     color: #cbd5e1; border-radius: 12px; padding: 10px 6px; font-weight: 700; font-size: 13px; cursor: pointer;
   }
-  .pay-btn.active { background: linear-gradient(180deg, #4ade80, #22c55e); color: #052e16; border-color: #86efac; }
+  .pay-btn.active {
+    background: linear-gradient(180deg, #4ade80, #22c55e);
+    color: #052e16; border-color: #86efac;
+    box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+  }
   .inp {
-    width: 100%; background: rgba(9, 17, 20, 0.92); border: 1px solid rgba(148, 163, 184, 0.22);
+    width: 100%; background: rgba(9, 17, 20, 0.94); border: 1px solid rgba(148, 163, 184, 0.22);
     color: #ffffff; border-radius: 12px; padding: 11px 12px; font-size: 14px; margin-bottom: 10px;
   }
 
   .bnav {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
-    background: rgba(10, 18, 22, 0.97); backdrop-filter: blur(12px);
+    background: rgba(10, 18, 22, 0.98); backdrop-filter: blur(12px);
     border-top: 1px solid rgba(148, 163, 184, 0.14); padding: 6px 8px 10px;
   }
   .bnav-inner { max-width: 430px; margin: 0 auto; display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
   .bnav-item {
-    border: none; background: transparent; color: #94a3b8; border-radius: 12px;
+    border: 1px solid transparent; background: transparent; color: #94a3b8; border-radius: 13px;
     padding: 6px 2px; cursor: pointer; text-align: center; font-size: 11px; font-weight: 600;
   }
   .bnav-item.active {
     background: linear-gradient(180deg, #4ade80, #22c55e);
-    color: #052e16; font-weight: 800; box-shadow: 0 4px 12px rgba(34, 197, 94, 0.35);
+    color: #052e16; font-weight: 800; border-color: #bbf7d0;
+    box-shadow: 0 0 16px rgba(52, 211, 153, 0.45), 0 4px 12px rgba(34, 197, 94, 0.35);
   }
   .bnav-item span { display: block; font-size: 16px; margin-bottom: 2px; }
   .toast {
@@ -1215,15 +1226,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
       <div class="wheel-stage">
         <div class="pointer-top"></div>
-        <div class="wheel-rim">
+        <div class="wheel-bezel">
           <div class="wheel-rotor" id="wheel-rotor">
-            <div class="slice-lbl" style="transform: rotate(-64deg) translate(56px, -6px);">1 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(-13deg) translate(56px, -6px);">3 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(38deg) translate(54px, -6px);">4 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(90deg) translate(50px, -6px);">6 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(141deg) translate(46px, -6px);">8 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(192deg) translate(42px, -6px);">10 PTS</div>
-            <div class="slice-lbl" style="transform: rotate(244deg) translate(34px, -6px);">Try Again</div>
+            <svg class="wheel-svg" viewBox="0 0 240 240">
+              <g id="wheel-slices"></g>
+              <circle cx="120" cy="120" r="115" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2" />
+            </svg>
           </div>
         </div>
         <button class="spin-hub" onclick="doSpin()">SPIN<br/>NOW</button>
@@ -1278,14 +1286,14 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
     <div class="m-top-grid">
       <div class="m-stat">
-        <div style="font-size:18px;">📅</div>
+        <div style="font-size:19px;">📅</div>
         <div>
           <div class="muted" style="font-size:11px;">Today's Claims:</div>
           <div style="font-size:14px;font-weight:800;" id="m-claims">0 / 6</div>
         </div>
       </div>
       <div class="m-stat">
-        <div style="font-size:18px;">⚡</div>
+        <div style="font-size:19px;">⚡</div>
         <div>
           <div class="muted" style="font-size:11px;">Mining Rate:</div>
           <div style="font-size:14px;font-weight:800;">~6 PTS / Session</div>
@@ -1298,13 +1306,16 @@ MINI_APP_HTML = """<!DOCTYPE html>
       <div class="pedestal-glow"></div>
       <div class="active-box">
         <div class="active-lbl" id="m-badge">MINING ACTIVE</div>
-        <div class="active-clock" id="m-clock">00:00:00</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px;">
+          <div class="active-clock" id="m-clock">00:00:00</div>
+          <div style="width:24px;height:24px;border-radius:50%;border:3px solid #2dd4bf;border-top-color:transparent;"></div>
+        </div>
       </div>
       <div class="muted" style="margin-bottom:12px;">Earn 5 to 10 PTS each claim</div>
       <button class="btn-green" id="m-btn" onclick="doMining()">READY TO CLAIM</button>
     </div>
 
-    <div class="alert-box" style="background:rgba(30,41,59,0.55);border-color:rgba(148,163,184,0.25);color:#cbd5e1;">
+    <div class="alert-box" style="background:rgba(28,39,46,0.72);border-color:rgba(148,163,184,0.22);color:#cbd5e1;">
       🕒 ২ ঘণ্টা পরপর মাইনিং • দিনে সর্বোচ্চ ৬ বার ক্লেম করা যাবে • পয়েন্ট সরাসরি ওয়ালেটে যোগ হবে
     </div>
   </section>
@@ -1375,14 +1386,15 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
     <div class="card" style="text-align:center;">
       <div style="font-size:13px;font-weight:700;">Enter 4-Digit PIN to Confirm Withdraw</div>
-      <div class="pin-4">
+      <div class="pin-4" onclick="focusPinInput()">
         <div class="pin-box" id="p0">•</div>
         <div class="pin-box" id="p1">•</div>
         <div class="pin-box" id="p2">•</div>
         <div class="pin-box" id="p3">•</div>
       </div>
       <div class="muted" style="font-size:11px;margin-top:6px;">ওয়ালেট কানেক্ট করার সময় সেট করা ৪ সংখ্যার পিন দিন।</div>
-      <input class="inp" style="margin-top:10px;text-align:center;letter-spacing:8px;" id="w-pin-confirm" type="password" maxlength="4" placeholder="••••" oninput="paintPin()" />
+      <input id="w-pin-confirm" type="password" maxlength="4" inputmode="numeric" oninput="paintPin()"
+        style="opacity:0;position:absolute;pointer-events:none;height:1px;width:1px;" />
     </div>
 
     <div class="card">
@@ -1424,6 +1436,52 @@ const USER = qp.get("user_id") || "user_1001";
 const NAME = qp.get("username") || "TapMintUser";
 const REF = qp.get("ref") || "";
 
+const WHEEL_SLOTS = [
+  { label: "1 PTS", color: "#16a34a" },
+  { label: "3 PTS", color: "#eab308" },
+  { label: "4 PTS", color: "#f97316" },
+  { label: "6 PTS", color: "#06b6d4" },
+  { label: "8 PTS", color: "#22c55e" },
+  { label: "10 PTS", color: "#ec4899" },
+  { label: "Try Again", color: "#8b5cf6" },
+];
+
+function renderWheelSvg() {
+  const g = document.getElementById("wheel-slices");
+  if (!g) return;
+  const cx = 120, cy = 120, r = 114;
+  const n = WHEEL_SLOTS.length;
+  const step = 360 / n;
+  let html = "";
+
+  for (let i = 0; i < n; i++) {
+    const startDeg = -90 + i * step;
+    const endDeg = startDeg + step;
+    const midDeg = startDeg + step / 2;
+
+    const sRad = (startDeg * Math.PI) / 180;
+    const eRad = (endDeg * Math.PI) / 180;
+
+    const x1 = cx + r * Math.cos(sRad);
+    const y1 = cy + r * Math.sin(sRad);
+    const x2 = cx + r * Math.cos(eRad);
+    const y2 = cy + r * Math.sin(eRad);
+
+    html += `<path d="M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 0 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" fill="${WHEEL_SLOTS[i].color}" stroke="#0f172a" stroke-width="2" />`;
+
+    const tr = 74;
+    const mRad = (midDeg * Math.PI) / 180;
+    const tx = cx + tr * Math.cos(mRad);
+    const ty = cy + tr * Math.sin(mRad);
+    const rot = midDeg + 90;
+
+    html += `<text x="${tx.toFixed(2)}" y="${ty.toFixed(2)}" fill="#ffffff" font-size="11.5" font-weight="800" text-anchor="middle" dominant-baseline="middle" transform="rotate(${rot.toFixed(2)}, ${tx.toFixed(2)}, ${ty.toFixed(2)})">${WHEEL_SLOTS[i].label}</text>`;
+  }
+  g.innerHTML = html;
+}
+
+renderWheelSvg();
+
 let ST = null;
 let SESS = 1;
 let PAY = "bKash";
@@ -1447,6 +1505,10 @@ function goPage(p) {
 function toggleWForm() {
   const f = document.getElementById("w-form");
   f.style.display = f.style.display === "none" ? "block" : "none";
+}
+
+function focusPinInput() {
+  document.getElementById("w-pin-confirm").focus();
 }
 
 function paintPin() {
@@ -1577,7 +1639,7 @@ function drawTasks() {
     row.className = "row-card";
     row.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;">
-        <div class="g-icon" style="width:42px;height:42px;font-size:18px;">${ico}</div>
+        <div class="t-badge-ico">${ico}</div>
         <div>
           <div style="font-weight:700;font-size:14px;">Task ${String(i).padStart(2, "0")}</div>
           <div style="font-size:12px;color:#34d399;font-weight:700;">Reward: +2 PTS</div>
@@ -1640,7 +1702,7 @@ async function doSpin() {
   }).then(x => x.json());
   if (!r.ok) return notify(r.error || "Spin not ready");
 
-  const sliceDeg = 360 / 7;
+  const sliceDeg = 360 / WHEEL_SLOTS.length;
   const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
   const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
   const baseMod = ((DEG % 360) + 360) % 360;
@@ -1687,7 +1749,7 @@ function drawGames() {
     el.className = "row-card";
     el.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;">
-        <div class="g-icon">${g.ico}</div>
+        <div class="g-thumb">${g.ico}</div>
         <div>
           <div style="font-weight:800;font-size:15px;">${g.title}</div>
           <div class="muted">${g.tgt}</div>
