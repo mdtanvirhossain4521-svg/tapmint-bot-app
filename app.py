@@ -356,7 +356,6 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
 
 
 def get_unlocked_session(sessions_rows) -> int:
-    # Session 1 is open initially; once completed (locked), the next unlocked session opens sequentially
     for s in sessions_rows:
         if int(s["is_locked"]) == 0:
             return int(s["session_num"])
@@ -1145,7 +1144,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   }
   .btn-3d-green {
     width: 100%; border: 1px solid #86efac; border-bottom: 4px solid #15803d;
-    border-radius: 15px; padding: 13px 16px;
+    border-radius: 15px; padding: 12px 16px;
     background: linear-gradient(180deg, #4ade80 0%, #22c55e 65%, #16a34a 100%);
     color: #052e16; font-weight: 800; font-size: 15px; cursor: pointer;
     box-shadow: 0 9px 22px rgba(34, 197, 94, 0.38), inset 0 1.5px 0 rgba(255, 255, 255, 0.6);
@@ -1237,6 +1236,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
   }
 
+  /* Photo 1 Mining Design */
   .m-top-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .m-stat {
     background: linear-gradient(175deg, rgba(24, 41, 48, 0.96), rgba(12, 21, 26, 0.99));
@@ -1245,32 +1245,73 @@ MINI_APP_HTML = """<!DOCTYPE html>
     border-radius: 15px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
     box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
   }
+  .mining-stage-card {
+    position: relative;
+    background: radial-gradient(circle at 50% 34%, rgba(20, 83, 68, 0.42) 0%, rgba(12, 23, 28, 0.96) 62%, rgba(8, 15, 19, 0.99) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 3px solid rgba(4, 9, 12, 0.92);
+    border-radius: 20px; padding: 16px 14px 15px; margin-bottom: 12px;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    text-align: center; overflow: hidden;
+  }
+  .coin-stage { position: relative; width: 200px; height: 170px; margin: 0 auto 8px; }
+  .sparkle {
+    position: absolute; color: #fde047; font-weight: 900;
+    text-shadow: 0 0 10px rgba(250, 204, 21, 0.85); pointer-events: none;
+  }
   .coin-pedestal {
-    width: 132px; height: 132px; margin: 4px auto 2px; border-radius: 50%;
-    background: radial-gradient(circle at 28% 22%, #fef9c3 0%, #facc15 42%, #ca8a04 75%, #713f12 100%);
-    border: 4px solid #fef08a;
-    box-shadow: 0 16px 32px rgba(234, 179, 8, 0.36), 0 5px 0 #713f12, inset 0 2px 6px rgba(255, 255, 255, 0.75);
+    position: relative; z-index: 3;
+    width: 128px; height: 128px; margin: 2px auto 0; border-radius: 50%;
+    background: radial-gradient(circle at 28% 20%, #fef9c3 0%, #facc15 44%, #ca8a04 78%, #713f12 100%);
+    border: 3.5px solid #fef08a;
+    box-shadow: 0 14px 26px rgba(0, 0, 0, 0.72), 0 4px 0 #713f12, inset 0 2px 6px rgba(255, 255, 255, 0.78);
     display: flex; align-items: center; justify-content: center;
   }
   .coin-leaf {
-    width: 98px; height: 98px; border-radius: 50%;
-    background: radial-gradient(circle at 32% 28%, #2dd4bf, #0f766e 72%, #064e3b 100%);
-    border: 2px solid rgba(153, 246, 228, 0.5);
-    display: flex; align-items: center; justify-content: center; font-size: 46px;
-    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.5);
+    width: 96px; height: 96px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 26%, #2dd4bf, #0f766e 74%, #064e3b 100%);
+    border: 2px solid rgba(153, 246, 228, 0.55);
+    display: flex; align-items: center; justify-content: center; font-size: 44px;
+    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.55);
   }
-  .pedestal-glow {
-    width: 184px; height: 32px; margin: -6px auto 12px; border-radius: 50%;
-    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.68) 0%, rgba(16, 185, 129, 0.16) 65%, transparent 100%);
-    border-top: 2px solid rgba(94, 234, 212, 0.9);
+  .pedestal-disc-top {
+    position: relative; z-index: 2;
+    width: 162px; height: 34px; margin: -8px auto 0; border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(45, 212, 191, 0.82) 0%, rgba(13, 148, 136, 0.35) 68%, transparent 100%);
+    border: 1.5px solid rgba(153, 246, 228, 0.75);
+    box-shadow: 0 0 22px rgba(45, 212, 191, 0.45);
+  }
+  .pedestal-disc-base {
+    position: relative; z-index: 1;
+    width: 118px; height: 22px; margin: -12px auto 4px; border-radius: 50%;
+    background: linear-gradient(180deg, #1e293b 0%, #090d12 100%);
+    border: 1px solid rgba(94, 234, 212, 0.45);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.85);
   }
   .active-box {
-    background: rgba(9, 17, 21, 0.96); border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 16px; padding: 12px 14px; margin-bottom: 12px;
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.65);
+    background: rgba(8, 15, 19, 0.94); border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 16px; padding: 11px 14px; margin-bottom: 10px;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.7);
   }
   .active-lbl { font-size: 11px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.7px; }
   .active-clock { font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 2px; }
+  .progress-line { font-size: 12px; color: #cbd5e1; margin-bottom: 11px; font-weight: 600; }
+  .m-claim-btn {
+    width: 100%; border: 1px solid #86efac; border-bottom: 4px solid #15803d;
+    border-radius: 15px; padding: 11px 14px;
+    background: linear-gradient(180deg, #4ade80 0%, #22c55e 65%, #16a34a 100%);
+    color: #052e16; font-weight: 800; cursor: pointer;
+    box-shadow: 0 9px 22px rgba(34, 197, 94, 0.36), inset 0 1.5px 0 rgba(255, 255, 255, 0.6);
+  }
+  .m-claim-btn:disabled { opacity: 0.88; cursor: not-allowed; }
+  .m-claim-main { font-size: 14px; font-weight: 900; line-height: 1.2; }
+  .m-claim-sub { font-size: 11px; font-weight: 700; opacity: 0.9; margin-top: 2px; }
+  .m-note-warm {
+    background: linear-gradient(180deg, rgba(66, 53, 33, 0.78), rgba(45, 36, 23, 0.86));
+    border: 1px solid rgba(217, 167, 96, 0.32);
+    color: #f3e8d2; border-radius: 14px; padding: 11px 12px; font-size: 12px;
+    line-height: 1.45; box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
+  }
 
   .g-thumb {
     width: 60px; height: 60px; border-radius: 15px;
@@ -1445,7 +1486,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div class="m-stat">
-        <div style="font-size:19px;">⚡</div>
+        <div style="font-size:19px;">⏱</div>
         <div>
           <div class="muted" style="font-size:11px;">Mining Rate:</div>
           <div style="font-size:14px;font-weight:800;">~6 PTS / Session</div>
@@ -1453,21 +1494,33 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="card-3d" style="text-align:center;">
-      <div class="coin-pedestal"><div class="coin-leaf">🌿</div></div>
-      <div class="pedestal-glow"></div>
+    <div class="mining-stage-card">
+      <div class="coin-stage">
+        <span class="sparkle" style="top:8px;right:34px;font-size:14px;">✦</span>
+        <span class="sparkle" style="top:34px;left:28px;font-size:11px;">✦</span>
+        <span class="sparkle" style="bottom:48px;right:24px;font-size:12px;">✦</span>
+        <div class="coin-pedestal"><div class="coin-leaf">🌿</div></div>
+        <div class="pedestal-disc-top"></div>
+        <div class="pedestal-disc-base"></div>
+      </div>
+
       <div class="active-box">
         <div class="active-lbl" id="m-badge">MINING ACTIVE</div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px;">
           <div class="active-clock" id="m-clock">00:00:00</div>
-          <div style="width:24px;height:24px;border-radius:50%;border:3px solid #2dd4bf;border-top-color:transparent;"></div>
+          <div style="width:26px;height:26px;border-radius:50%;border:3.5px solid #2dd4bf;border-top-color:transparent;"></div>
         </div>
       </div>
-      <div class="muted" style="margin-bottom:12px;">Earn 5 to 10 PTS each claim</div>
-      <button class="btn-3d-green" id="m-btn" onclick="doMining()">READY TO CLAIM</button>
+
+      <div class="progress-line" id="m-progress">Mining Progress: 100% • Earn 5 to 10 PTS each claim</div>
+
+      <button class="m-claim-btn" id="m-btn" onclick="doMining()">
+        <div class="m-claim-main" id="m-btn-main">READY TO CLAIM (+7 PTS)</div>
+        <div class="m-claim-sub" id="m-btn-sub">Claim available now</div>
+      </button>
     </div>
 
-    <div class="alert-box" style="background:rgba(28,39,46,0.75);border-color:rgba(148,163,184,0.22);color:#cbd5e1;">
+    <div class="m-note-warm">
       🕒 ২ ঘণ্টা পরপর মাইনিং • দিনে সর্বোচ্চ ৬ বার ক্লেম করা যাবে • পয়েন্ট সরাসরি ওয়ালেটে যোগ হবে
     </div>
   </section>
@@ -1728,6 +1781,40 @@ function drawSpinClock() {
   }
 }
 
+function drawMiningUi() {
+  if (!ST) return;
+  const clm = ST.mining.claims_today;
+  const maxC = ST.mining.max_daily;
+  const totalSec = 7200;
+  const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
+  const remSec = activeM ? Math.max(0, Math.floor((new Date(ST.mining.next_claim_at) - new Date()) / 1000)) : 0;
+  const pct = activeM ? Math.max(1, Math.min(99, Math.round(((totalSec - remSec) / totalSec) * 100))) : 100;
+
+  document.getElementById("m-claims").textContent = `${clm} / ${maxC}`;
+  document.getElementById("m-clock").textContent = activeM ? fmtTime(ST.mining.next_claim_at) : "00:00:00";
+  document.getElementById("m-badge").textContent = activeM ? "MINING ACTIVE" : "MINING READY";
+  document.getElementById("m-progress").textContent = `Mining Progress: ${pct}% • Earn 5 to 10 PTS each claim`;
+  document.getElementById("home-m-txt").textContent = activeM ? `${fmtTime(ST.mining.next_claim_at)} left` : "Ready to claim";
+
+  const mb = document.getElementById("m-btn");
+  const mMain = document.getElementById("m-btn-main");
+  const mSub = document.getElementById("m-btn-sub");
+
+  if (clm >= maxC) {
+    mb.disabled = true;
+    mMain.textContent = "DAILY LIMIT REACHED (6/6)";
+    mSub.textContent = "Come back tomorrow for next mining cycle";
+  } else if (activeM) {
+    mb.disabled = true;
+    mMain.textContent = "MINING IN PROGRESS";
+    mSub.textContent = `Next claim in ${fmtTime(ST.mining.next_claim_at)}`;
+  } else {
+    mb.disabled = false;
+    mMain.textContent = "READY TO CLAIM (+7 PTS)";
+    mSub.textContent = "Tap to claim 5–10 PTS now";
+  }
+}
+
 function draw() {
   if (!ST) return;
   const b = ST.user.pts_balance;
@@ -1737,26 +1824,7 @@ function draw() {
 
   drawDayTracker(ST.spin.spin_streak_days);
   drawSpinClock();
-
-  const clm = ST.mining.claims_today;
-  const maxC = ST.mining.max_daily;
-  const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
-  document.getElementById("m-claims").textContent = `${clm} / ${maxC}`;
-  document.getElementById("m-clock").textContent = activeM ? fmtTime(ST.mining.next_claim_at) : "00:00:00";
-  document.getElementById("m-badge").textContent = activeM ? "MINING ACTIVE" : "MINING READY";
-  document.getElementById("home-m-txt").textContent = activeM ? `${fmtTime(ST.mining.next_claim_at)} left` : "Ready to claim";
-
-  const mb = document.getElementById("m-btn");
-  if (clm >= maxC) {
-    mb.disabled = true;
-    mb.textContent = "DAILY LIMIT REACHED (6/6)";
-  } else if (activeM) {
-    mb.disabled = true;
-    mb.textContent = `Next claim in ${fmtTime(ST.mining.next_claim_at)}`;
-  } else {
-    mb.disabled = false;
-    mb.textContent = "READY TO CLAIM";
-  }
+  drawMiningUi();
 
   const doneS = ST.task_sessions.filter(x => x.completed_count >= 20 || x.is_locked).length;
   document.getElementById("home-t-txt").textContent = `${doneS}/5 Completed`;
@@ -2057,11 +2125,7 @@ async function loadApp() {
 setInterval(() => {
   if (!ST) return;
   drawSpinClock();
-  const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
-  if (activeM) {
-    document.getElementById("m-clock").textContent = fmtTime(ST.mining.next_claim_at);
-    document.getElementById("home-m-txt").textContent = `${fmtTime(ST.mining.next_claim_at)} left`;
-  }
+  drawMiningUi();
   drawSessions();
 }, 1000);
 
