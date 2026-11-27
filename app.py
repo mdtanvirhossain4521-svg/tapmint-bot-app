@@ -1,4 +1,901 @@
-<!DOCTYPE html>
+import hashlib
+import hmac
+import json
+import os
+import random
+import sqlite3
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from flask import Flask, jsonify, request
+
+app = Flask(__name__)
+
+DB_PATH = os.environ.get("TAPMINT_DB_PATH", "tapmint.db")
+ADMIN_KEY = os.environ.get("TAPMINT_ADMIN_KEY", "TAPMINT_ADMIN_99")
+MASTER_REF = os.environ.get("TAPMINT_MASTER_REF", "TAPMINT_MASTER_99")
+SECRET_SALT = os.environ.get("TAPMINT_SECRET_SALT", "tapmint_secret_salt_2026")
+
+GENERAL_MIN_WITHDRAW_PTS = 1000
+BINANCE_MIN_WITHDRAW_PTS = 1500
+BINANCE_MIN_USDT_EQUIVALENT = 5
+WITHDRAW_FEE_RATE = 0.05
+BINANCE_NETWORK_FEE_PTS = 50
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_now() -> str:
+    return now_utc().isoformat()
+
+
+def parse_iso(val: str):
+    if not val:
+        return None
+    try:
+        dt = datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+
+def hash_pin(pin: str) -> str:
+    msg = f"{SECRET_SALT}:pin:{pin}".encode("utf-8")
+    return hmac.new(SECRET_SALT.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def make_security_hash(user_id: str, action: str, amount: int, ts_iso: str) -> str:
+    raw = f"{user_id}|{action}|{amount}|{ts_iso}".encode("utf-8")
+    return hmac.new(SECRET_SALT.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+
+
+def init_db() -> None:
+    conn = get_conn()
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                referred_by TEXT DEFAULT '',
+                is_master_ref INTEGER DEFAULT 0,
+                pts_balance INTEGER NOT NULL DEFAULT 0,
+                total_earned_pts INTEGER NOT NULL DEFAULT 0,
+                total_withdrawn_pts INTEGER NOT NULL DEFAULT 0,
+                ad_revenue_tier3_units INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS wallets (
+                user_id TEXT PRIMARY KEY,
+                method TEXT NOT NULL DEFAULT 'bKash',
+                account_target TEXT NOT NULL DEFAULT '',
+                pin_hash TEXT NOT NULL DEFAULT '',
+                is_connected INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS earning_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                pts_delta INTEGER NOT NULL,
+                ad_tier TEXT NOT NULL DEFAULT 'tier3',
+                security_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS task_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                session_num INTEGER NOT NULL,
+                completed_count INTEGER NOT NULL DEFAULT 0,
+                is_locked INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT DEFAULT '',
+                UNIQUE(user_id, session_num)
+            );
+
+            CREATE TABLE IF NOT EXISTS active_task_starts (
+                user_id TEXT NOT NULL,
+                session_num INTEGER NOT NULL,
+                task_num INTEGER NOT NULL,
+                opened_at TEXT NOT NULL,
+                launch_url TEXT NOT NULL,
+                PRIMARY KEY(user_id, session_num, task_num)
+            );
+
+            CREATE TABLE IF NOT EXISTS mining_state (
+                user_id TEXT PRIMARY KEY,
+                day_key TEXT NOT NULL,
+                claims_today INTEGER NOT NULL DEFAULT 0,
+                last_claim_at TEXT DEFAULT '',
+                next_claim_at TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS game_sessions (
+                session_token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                game_name TEXT NOT NULL,
+                reward_pts INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                ad_verified INTEGER NOT NULL DEFAULT 0,
+                ad_verified_at TEXT DEFAULT '',
+                claimed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS spin_state (
+                user_id TEXT PRIMARY KEY,
+                day_key TEXT NOT NULL,
+                spins_used_today INTEGER NOT NULL DEFAULT 0,
+                last_spin_at TEXT DEFAULT '',
+                next_spin_at TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                account_target TEXT NOT NULL,
+                requested_pts INTEGER NOT NULL,
+                fee_pts INTEGER NOT NULL,
+                net_pts INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                security_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS note_khata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_type TEXT NOT NULL,
+                ref_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                gross_pts INTEGER NOT NULL,
+                fee_pts INTEGER NOT NULL,
+                net_pts INTEGER NOT NULL,
+                reserve_balance_pts INTEGER NOT NULL,
+                note_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
+    # Zero initial reserve funds; computed strictly from ledger net inflows minus approved outflows
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(
+            CASE
+                WHEN entry_type IN ('tier3_ad_inflow', 'withdraw_fee_inflow') THEN net_pts
+                WHEN entry_type = 'withdraw_approved_outflow' THEN -net_pts
+                ELSE 0
+            END
+        ), 0) AS bal
+        FROM note_khata
+        """
+    ).fetchone()
+    return int(row["bal"] or 0)
+
+
+def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMintUser", ref: str = "") -> None:
+    clean_uid = (user_id or "user_1001").strip()[:64]
+    clean_name = (username or "TapMintUser").strip()[:64]
+    clean_ref = (ref or "").strip()[:64]
+    ts = iso_now()
+    day_key = now_utc().strftime("%Y-%m-%d")
+
+    existing = conn.execute("SELECT user_id, referred_by FROM users WHERE user_id = ?", (clean_uid,)).fetchone()
+    if not existing:
+        is_master = 1 if clean_ref == MASTER_REF else 0
+        ref_val = clean_ref if clean_ref and clean_ref != clean_uid else ""
+        conn.execute(
+            """
+            INSERT INTO users (
+                user_id, username, referred_by, is_master_ref, pts_balance,
+                total_earned_pts, total_withdrawn_pts, ad_revenue_tier3_units,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
+            """,
+            (clean_uid, clean_name, ref_val, is_master, ts, ts),
+        )
+        if ref_val and ref_val != MASTER_REF:
+            parent = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (ref_val,)).fetchone()
+            if parent:
+                bonus_pts = 25
+                s_hash = make_security_hash(ref_val, "referral_bonus", bonus_pts, ts)
+                conn.execute(
+                    "UPDATE users SET pts_balance = pts_balance + ?, total_earned_pts = total_earned_pts + ?, updated_at = ? WHERE user_id = ?",
+                    (bonus_pts, bonus_pts, ts, ref_val),
+                )
+                conn.execute(
+                    "INSERT INTO earning_logs (user_id, source_type, pts_delta, ad_tier, security_hash, created_at) VALUES (?, 'referral_bonus', ?, 'tier3', ?, ?)",
+                    (ref_val, bonus_pts, s_hash, ts),
+                )
+    else:
+        conn.execute("UPDATE users SET username = ?, updated_at = ? WHERE user_id = ?", (clean_name, ts, clean_uid))
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO wallets (user_id, method, account_target, pin_hash, is_connected, updated_at)
+        VALUES (?, 'bKash', '', '', 0, ?)
+        """,
+        (clean_uid, ts),
+    )
+
+    for s_num in range(1, 6):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO task_sessions (user_id, session_num, completed_count, is_locked, locked_until)
+            VALUES (?, ?, 0, 0, '')
+            """,
+            (clean_uid, s_num),
+        )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO mining_state (user_id, day_key, claims_today, last_claim_at, next_claim_at)
+        VALUES (?, ?, 0, '', '')
+        """,
+        (clean_uid, day_key),
+    )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO spin_state (user_id, day_key, spins_used_today, last_spin_at, next_spin_at)
+        VALUES (?, ?, 0, '', '')
+        """,
+        (clean_uid, day_key),
+    )
+
+    # Roll daily counters if UTC date changed
+    m_row = conn.execute("SELECT day_key FROM mining_state WHERE user_id = ?", (clean_uid,)).fetchone()
+    if m_row and m_row["day_key"] != day_key:
+        conn.execute("UPDATE mining_state SET day_key = ?, claims_today = 0 WHERE user_id = ?", (day_key, clean_uid))
+
+    s_row = conn.execute("SELECT day_key FROM spin_state WHERE user_id = ?", (clean_uid,)).fetchone()
+    if s_row and s_row["day_key"] != day_key:
+        conn.execute("UPDATE spin_state SET day_key = ?, spins_used_today = 0 WHERE user_id = ?", (day_key, clean_uid))
+
+    # Release expired 2-hour task session locks
+    sess_rows = conn.execute(
+        "SELECT id, is_locked, locked_until FROM task_sessions WHERE user_id = ? AND is_locked = 1",
+        (clean_uid,),
+    ).fetchall()
+    cur_dt = now_utc()
+    for sr in sess_rows:
+        lu = parse_iso(sr["locked_until"])
+        if lu and cur_dt >= lu:
+            conn.execute(
+                "UPDATE task_sessions SET is_locked = 0, locked_until = '', completed_count = 0 WHERE id = ?",
+                (sr["id"],),
+            )
+
+
+def credit_user_pts(conn: sqlite3.Connection, user_id: str, source_type: str, pts: int, tier3_units: int = 1) -> str:
+    ts = iso_now()
+    s_hash = make_security_hash(user_id, source_type, pts, ts)
+    conn.execute(
+        """
+        UPDATE users
+        SET pts_balance = pts_balance + ?,
+            total_earned_pts = total_earned_pts + ?,
+            ad_revenue_tier3_units = ad_revenue_tier3_units + ?,
+            updated_at = ?
+        WHERE user_id = ?
+        """,
+        (pts, pts, tier3_units, ts, user_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO earning_logs (user_id, source_type, pts_delta, ad_tier, security_hash, created_at)
+        VALUES (?, ?, ?, 'tier3', ?, ?)
+        """,
+        (user_id, source_type, pts, s_hash, ts),
+    )
+    return s_hash
+
+
+def mask_target(target: str) -> str:
+    t = (target or "").strip()
+    if len(t) <= 6:
+        return t or "Not Set"
+    return f"{t[:3]}••••{t[-4:]}"
+
+
+def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
+    u = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    w = conn.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,)).fetchone()
+    m = conn.execute("SELECT * FROM mining_state WHERE user_id = ?", (user_id,)).fetchone()
+    sp = conn.execute("SELECT * FROM spin_state WHERE user_id = ?", (user_id,)).fetchone()
+    sessions = conn.execute(
+        "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
+        (user_id,),
+    ).fetchall()
+
+    total_refs = conn.execute("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (user_id,)).fetchone()["c"]
+    active_refs = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE referred_by = ? AND total_earned_pts > 0",
+        (user_id,),
+    ).fetchone()["c"]
+    ref_bonus = conn.execute(
+        "SELECT COALESCE(SUM(pts_delta), 0) AS s FROM earning_logs WHERE user_id = ? AND source_type = 'referral_bonus'",
+        (user_id,),
+    ).fetchone()["s"]
+
+    return {
+        "ok": True,
+        "user": {
+            "user_id": u["user_id"],
+            "username": u["username"],
+            "pts_balance": int(u["pts_balance"]),
+            "total_earned_pts": int(u["total_earned_pts"]),
+        },
+        "wallet": {
+            "connected": bool(w["is_connected"]),
+            "method": w["method"],
+            "masked_target": mask_target(w["account_target"]),
+        },
+        "spin": {
+            "max_daily": 1,
+            "spins_used_today": int(sp["spins_used_today"]),
+            "next_spin_at": sp["next_spin_at"] or "",
+        },
+        "mining": {
+            "max_daily": 6,
+            "claims_today": int(m["claims_today"]),
+            "next_claim_at": m["next_claim_at"] or "",
+        },
+        "task_sessions": [
+            {
+                "session_num": int(s["session_num"]),
+                "completed_count": int(s["completed_count"]),
+                "is_locked": bool(s["is_locked"]),
+                "locked_until": s["locked_until"] or "",
+            }
+            for s in sessions
+        ],
+        "referral": {
+            "total_referrals": int(total_refs),
+            "active_referrals": int(active_refs),
+            "current_bonus_pts": int(ref_bonus),
+        },
+        "withdraw_rules": {
+            "general_min_pts": GENERAL_MIN_WITHDRAW_PTS,
+            "binance_min_pts": BINANCE_MIN_WITHDRAW_PTS,
+            "binance_min_usdt_rule": BINANCE_MIN_USDT_EQUIVALENT,
+            "fee_rate": WITHDRAW_FEE_RATE,
+            "binance_network_fee_pts": BINANCE_NETWORK_FEE_PTS,
+        },
+    }
+
+
+def require_admin(req) -> bool:
+    key = (req.headers.get("X-Admin-Key") or req.args.get("admin_key") or "").strip()
+    if not key and req.is_json:
+        key = str((req.get_json(silent=True) or {}).get("admin_key") or "").strip()
+    return bool(key) and hmac.compare_digest(key, ADMIN_KEY)
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True, "service": "tapmint", "time": iso_now()})
+
+
+@app.route("/api/user/bootstrap")
+def api_bootstrap():
+    user_id = (request.args.get("user_id") or "user_1001").strip()
+    username = (request.args.get("username") or "TapMintUser").strip()
+    ref = (request.args.get("ref") or "").strip()
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username, ref)
+        conn.commit()
+        return jsonify(build_bootstrap(conn, user_id))
+    finally:
+        conn.close()
+
+
+@app.route("/api/spin", methods=["POST"])
+def api_spin():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        sp = conn.execute("SELECT * FROM spin_state WHERE user_id = ?", (user_id,)).fetchone()
+        if int(sp["spins_used_today"]) >= 1:
+            return jsonify({"ok": False, "error": "Daily spin already used today"}), 400
+
+        # Max 15 PTS, low odds on top rewards
+        outcomes = [
+            ("1 PTS", 1, 28),
+            ("2 PTS", 2, 26),
+            ("5 PTS", 5, 18),
+            ("Bonus", 3, 12),
+            ("Try Again", 0, 10),
+            ("10 PTS", 10, 4),
+            ("15 PTS", 15, 2),
+        ]
+        labels = [x[0] for x in outcomes]
+        pts_vals = [x[1] for x in outcomes]
+        weights = [x[2] for x in outcomes]
+        idx = random.choices(range(len(outcomes)), weights=weights, k=1)[0]
+        slot_label = labels[idx]
+        pts_earned = pts_vals[idx]
+
+        ts = iso_now()
+        next_at = (now_utc() + timedelta(hours=24)).isoformat()
+        conn.execute(
+            "UPDATE spin_state SET spins_used_today = spins_used_today + 1, last_spin_at = ?, next_spin_at = ? WHERE user_id = ?",
+            (ts, next_at, user_id),
+        )
+        if pts_earned > 0:
+            credit_user_pts(conn, user_id, "daily_spin", pts_earned, tier3_units=1)
+        conn.commit()
+        return jsonify({"ok": True, "slot": slot_label, "pts_earned": pts_earned, "next_spin_at": next_at})
+    finally:
+        conn.close()
+
+
+@app.route("/api/task/open", methods=["POST"])
+def api_task_open():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    s_num = int(data.get("session_num") or 1)
+    t_num = int(data.get("task_num") or 1)
+    if s_num < 1 or s_num > 5 or t_num < 1 or t_num > 20:
+        return jsonify({"ok": False, "error": "Invalid session or task number"}), 400
+
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        sess = conn.execute(
+            "SELECT * FROM task_sessions WHERE user_id = ? AND session_num = ?",
+            (user_id, s_num),
+        ).fetchone()
+        if int(sess["is_locked"]) == 1:
+            return jsonify({"ok": False, "error": "Session is locked for 2 hours"}), 400
+
+        ts = iso_now()
+        launch_url = f"https://example.com/tapmint-task?s={s_num}&t={t_num}&u={user_id}"
+        conn.execute(
+            """
+            INSERT INTO active_task_starts (user_id, session_num, task_num, opened_at, launch_url)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, session_num, task_num)
+            DO UPDATE SET opened_at = excluded.opened_at, launch_url = excluded.launch_url
+            """,
+            (user_id, s_num, t_num, ts, launch_url),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "wait_seconds_min": 8, "wait_seconds_max": 10, "launch_url": launch_url})
+    finally:
+        conn.close()
+
+
+@app.route("/api/task/complete", methods=["POST"])
+def api_task_complete():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    s_num = int(data.get("session_num") or 1)
+    t_num = int(data.get("task_num") or 1)
+
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        sess = conn.execute(
+            "SELECT * FROM task_sessions WHERE user_id = ? AND session_num = ?",
+            (user_id, s_num),
+        ).fetchone()
+        if int(sess["is_locked"]) == 1:
+            return jsonify({"ok": False, "error": "Session locked"}), 400
+
+        st = conn.execute(
+            "SELECT * FROM active_task_starts WHERE user_id = ? AND session_num = ? AND task_num = ?",
+            (user_id, s_num, t_num),
+        ).fetchone()
+        if not st:
+            return jsonify({"ok": False, "error": "Open the task first"}), 400
+
+        opened_dt = parse_iso(st["opened_at"])
+        elapsed = (now_utc() - opened_dt).total_seconds() if opened_dt else 0
+        if elapsed < 8.0:
+            return jsonify({"ok": False, "error": f"Wait at least 8-10s ({int(8 - elapsed)}s left)"}), 400
+
+        conn.execute(
+            "DELETE FROM active_task_starts WHERE user_id = ? AND session_num = ? AND task_num = ?",
+            (user_id, s_num, t_num),
+        )
+
+        new_cnt = int(sess["completed_count"]) + 1
+        reward_pts = 2
+        credit_user_pts(conn, user_id, f"task_s{s_num}_t{t_num}", reward_pts, tier3_units=1)
+
+        if new_cnt >= 20:
+            lock_until = (now_utc() + timedelta(hours=2)).isoformat()
+            conn.execute(
+                "UPDATE task_sessions SET completed_count = 20, is_locked = 1, locked_until = ? WHERE user_id = ? AND session_num = ?",
+                (lock_until, user_id, s_num),
+            )
+        else:
+            conn.execute(
+                "UPDATE task_sessions SET completed_count = ? WHERE user_id = ? AND session_num = ?",
+                (new_cnt, user_id, s_num),
+            )
+
+        conn.commit()
+        return jsonify({"ok": True, "pts_earned": reward_pts, "completed_in_session": new_cnt})
+    finally:
+        conn.close()
+
+
+@app.route("/api/mining/claim", methods=["POST"])
+def api_mining_claim():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        m = conn.execute("SELECT * FROM mining_state WHERE user_id = ?", (user_id,)).fetchone()
+        claims_today = int(m["claims_today"])
+        if claims_today >= 6:
+            return jsonify({"ok": False, "error": "Max 6 mining claims per day reached"}), 400
+
+        next_dt = parse_iso(m["next_claim_at"])
+        if next_dt and now_utc() < next_dt:
+            return jsonify({"ok": False, "error": "Mining cooldown active (every 2 hours)"}), 400
+
+        # 5 to 10 PTS with heavier weight on 5-7 PTS
+        pts_earned = random.choices([5, 6, 7, 8, 9, 10], weights=[32, 30, 20, 9, 5, 4], k=1)[0]
+        ts = iso_now()
+        next_claim_at = (now_utc() + timedelta(hours=2)).isoformat()
+        conn.execute(
+            "UPDATE mining_state SET claims_today = claims_today + 1, last_claim_at = ?, next_claim_at = ? WHERE user_id = ?",
+            (ts, next_claim_at, user_id),
+        )
+        credit_user_pts(conn, user_id, "mining_claim", pts_earned, tier3_units=1)
+        conn.commit()
+        return jsonify({
+            "ok": True,
+            "pts_earned": pts_earned,
+            "claims_today": claims_today + 1,
+            "next_claim_at": next_claim_at,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/game/start", methods=["POST"])
+def api_game_start():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    game_name = (data.get("game_name") or "Tap Surge Combo").strip()[:64]
+    reward_pts = int(data.get("reward_pts") or 5)
+    reward_pts = max(1, min(reward_pts, 15))
+
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        token = uuid.uuid4().hex
+        conn.execute(
+            """
+            INSERT INTO game_sessions (session_token, user_id, game_name, reward_pts, started_at, ad_verified, claimed)
+            VALUES (?, ?, ?, ?, ?, 0, 0)
+            """,
+            (token, user_id, game_name, reward_pts, iso_now()),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "session_token": token, "ad_required": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/game/ad-complete", methods=["POST"])
+def api_game_ad_complete():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    token = (data.get("session_token") or "").strip()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM game_sessions WHERE session_token = ? AND user_id = ?",
+            (token, user_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Game session not found"}), 404
+        conn.execute(
+            "UPDATE game_sessions SET ad_verified = 1, ad_verified_at = ? WHERE session_token = ?",
+            (iso_now(), token),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "ad_verified": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/game/claim", methods=["POST"])
+def api_game_claim():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    token = (data.get("session_token") or "").strip()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM game_sessions WHERE session_token = ? AND user_id = ?",
+            (token, user_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Game session not found"}), 404
+        if int(row["claimed"]) == 1:
+            return jsonify({"ok": False, "error": "Reward already claimed"}), 400
+        if int(row["ad_verified"]) != 1:
+            return jsonify({"ok": False, "error": "Mandatory ad verification incomplete"}), 400
+
+        pts_earned = int(row["reward_pts"])
+        conn.execute("UPDATE game_sessions SET claimed = 1 WHERE session_token = ?", (token,))
+        credit_user_pts(conn, user_id, f"game:{row['game_name']}", pts_earned, tier3_units=1)
+        conn.commit()
+        return jsonify({"ok": True, "pts_earned": pts_earned})
+    finally:
+        conn.close()
+
+
+@app.route("/api/wallet/connect", methods=["POST"])
+def api_wallet_connect():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    username = (data.get("username") or "TapMintUser").strip()
+    method = (data.get("method") or "bKash").strip()
+    target = (data.get("account_target") or "").strip()
+    pin = (data.get("pin") or "").strip()
+
+    if method not in ("bKash", "Nagad", "Binance USDT"):
+        return jsonify({"ok": False, "error": "Unsupported payment method"}), 400
+    if len(target) < 6:
+        return jsonify({"ok": False, "error": "Enter a valid wallet number or address"}), 400
+    if not (len(pin) == 4 and pin.isdigit()):
+        return jsonify({"ok": False, "error": "PIN must be exactly 4 digits"}), 400
+
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id, username)
+        conn.execute(
+            """
+            UPDATE wallets
+            SET method = ?, account_target = ?, pin_hash = ?, is_connected = 1, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (method, target, hash_pin(pin), iso_now(), user_id),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "method": method, "masked_target": mask_target(target)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/withdraw/request", methods=["POST"])
+def api_withdraw_request():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    method = (data.get("method") or "bKash").strip()
+    req_pts = int(data.get("requested_pts") or 0)
+    pin = (data.get("pin") or "").strip()
+
+    conn = get_conn()
+    try:
+        ensure_user(conn, user_id)
+        u = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        w = conn.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,)).fetchone()
+
+        if not w or int(w["is_connected"]) != 1 or not w["pin_hash"]:
+            return jsonify({"ok": False, "error": "Connect wallet and set 4-digit PIN first"}), 400
+        if not hmac.compare_digest(w["pin_hash"], hash_pin(pin)):
+            return jsonify({"ok": False, "error": "Invalid 4-digit PIN"}), 400
+
+        min_req = BINANCE_MIN_WITHDRAW_PTS if method == "Binance USDT" else GENERAL_MIN_WITHDRAW_PTS
+        if req_pts < min_req:
+            return jsonify({"ok": False, "error": f"Minimum {min_req} PTS required for {method}"}), 400
+        if req_pts > int(u["pts_balance"]):
+            return jsonify({"ok": False, "error": "Insufficient PTS balance"}), 400
+
+        pct_fee = int(round(req_pts * WITHDRAW_FEE_RATE))
+        net_fee = BINANCE_NETWORK_FEE_PTS if method == "Binance USDT" else 0
+        total_fee = min(req_pts - 1, pct_fee + net_fee)
+        net_pts = req_pts - total_fee
+
+        ts = iso_now()
+        s_hash = make_security_hash(user_id, f"withdraw:{method}", req_pts, ts)
+        conn.execute(
+            "UPDATE users SET pts_balance = pts_balance - ?, updated_at = ? WHERE user_id = ?",
+            (req_pts, ts, user_id),
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO withdrawals (
+                user_id, method, account_target, requested_pts, fee_pts, net_pts,
+                status, security_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (user_id, method, w["account_target"], req_pts, total_fee, net_pts, s_hash, ts),
+        )
+        wid = cur.lastrowid
+        conn.commit()
+        return jsonify({
+            "ok": True,
+            "withdraw_id": wid,
+            "requested_pts": req_pts,
+            "fee_pts": total_fee,
+            "net_pts": net_pts,
+            "status": "pending",
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/overview")
+def api_admin_overview():
+    if not require_admin(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    conn = get_conn()
+    try:
+        reserve_pts = get_reserve_balance_pts(conn)
+        user_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        master_ref_count = conn.execute("SELECT COUNT(*) AS c FROM users WHERE is_master_ref = 1").fetchone()["c"]
+        tier3_units = conn.execute("SELECT COALESCE(SUM(ad_revenue_tier3_units), 0) AS s FROM users").fetchone()["s"]
+        pending_w = conn.execute(
+            "SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY id DESC"
+        ).fetchall()
+        ledger = conn.execute(
+            "SELECT * FROM note_khata ORDER BY id DESC LIMIT 100"
+        ).fetchall()
+        return jsonify({
+            "ok": True,
+            "reserve_balance_pts": reserve_pts,
+            "total_users": int(user_count),
+            "master_affiliate_users": int(master_ref_count),
+            "tier3_ad_units": int(tier3_units),
+            "pending_withdrawals": [dict(r) for r in pending_w],
+            "note_khata": [dict(r) for r in ledger],
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/note-khata/add", methods=["POST"])
+def api_admin_khata_add():
+    if not require_admin(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    entry_type = (data.get("entry_type") or "tier3_ad_inflow").strip()
+    if entry_type not in ("tier3_ad_inflow", "withdraw_fee_inflow", "withdraw_approved_outflow"):
+        return jsonify({"ok": False, "error": "Invalid entry type"}), 400
+
+    gross_pts = max(0, int(data.get("gross_pts") or 0))
+    fee_pts = max(0, int(data.get("fee_pts") or 0))
+    net_pts = max(0, int(data.get("net_pts") or gross_pts))
+    user_id = (data.get("user_id") or "ADMIN_LEDGER").strip()
+    method = (data.get("method") or "Tier3Ad").strip()
+    note_text = (data.get("note_text") or "নোট খাতা এন্ট্রি").strip()[:200]
+
+    conn = get_conn()
+    try:
+        current_res = get_reserve_balance_pts(conn)
+        delta = net_pts if entry_type != "withdraw_approved_outflow" else -net_pts
+        new_res = current_res + delta
+        ts = iso_now()
+        conn.execute(
+            """
+            INSERT INTO note_khata (
+                entry_type, ref_id, user_id, method, gross_pts, fee_pts, net_pts,
+                reserve_balance_pts, note_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry_type, f"NK-{uuid.uuid4().hex[:8]}", user_id, method, gross_pts, fee_pts, net_pts, new_res, note_text, ts),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "reserve_balance_pts": new_res})
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/withdraw/review", methods=["POST"])
+def api_admin_withdraw_review():
+    if not require_admin(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    wid = int(data.get("withdraw_id") or 0)
+    decision = (data.get("decision") or "").strip().lower()
+    if decision not in ("approve", "reject"):
+        return jsonify({"ok": False, "error": "Decision must be approve or reject"}), 400
+
+    conn = get_conn()
+    try:
+        w = conn.execute("SELECT * FROM withdrawals WHERE id = ?", (wid,)).fetchone()
+        if not w:
+            return jsonify({"ok": False, "error": "Withdraw request not found"}), 404
+        if w["status"] != "pending":
+            return jsonify({"ok": False, "error": "Already reviewed"}), 400
+
+        ts = iso_now()
+        if decision == "reject":
+            conn.execute(
+                "UPDATE users SET pts_balance = pts_balance + ?, updated_at = ? WHERE user_id = ?",
+                (int(w["requested_pts"]), ts, w["user_id"]),
+            )
+            conn.execute(
+                "UPDATE withdrawals SET status = 'rejected', reviewed_at = ? WHERE id = ?",
+                (ts, wid),
+            )
+            conn.commit()
+            return jsonify({"ok": True, "withdraw_id": wid, "status": "rejected"})
+
+        # Approve: automatically log fee inflow + approved payout outflow in নোট খাতা
+        conn.execute(
+            "UPDATE withdrawals SET status = 'approved', reviewed_at = ? WHERE id = ?",
+            (ts, wid),
+        )
+        conn.execute(
+            "UPDATE users SET total_withdrawn_pts = total_withdrawn_pts + ?, updated_at = ? WHERE user_id = ?",
+            (int(w["requested_pts"]), ts, w["user_id"]),
+        )
+
+        fee_pts = int(w["fee_pts"])
+        net_pts = int(w["net_pts"])
+        gross_pts = int(w["requested_pts"])
+
+        res_after_fee = get_reserve_balance_pts(conn) + fee_pts
+        conn.execute(
+            """
+            INSERT INTO note_khata (
+                entry_type, ref_id, user_id, method, gross_pts, fee_pts, net_pts,
+                reserve_balance_pts, note_text, created_at
+            ) VALUES ('withdraw_fee_inflow', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (f"WD-{wid}", w["user_id"], w["method"], gross_pts, fee_pts, fee_pts, res_after_fee, f"উইথড্র ফি লগ (#{wid})", ts),
+        )
+
+        res_after_out = res_after_fee - net_pts
+        conn.execute(
+            """
+            INSERT INTO note_khata (
+                entry_type, ref_id, user_id, method, gross_pts, fee_pts, net_pts,
+                reserve_balance_pts, note_text, created_at
+            ) VALUES ('withdraw_approved_outflow', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (f"WD-{wid}", w["user_id"], w["method"], gross_pts, fee_pts, net_pts, res_after_out, f"উইথড্র অনুমোদিত পেআউট (#{wid})", ts),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "withdraw_id": wid, "status": "approved", "reserve_balance_pts": res_after_out})
+    finally:
+        conn.close()
+
+
+MINI_APP_HTML = """<!DOCTYPE html>
 <html lang="bn">
 <head>
 <meta charset="UTF-8" />
@@ -34,7 +931,6 @@
   .page { display: none; }
   .page.active { display: block; }
 
-  /* Balance & Boost */
   .bal-wrap { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .bal-left { display: flex; align-items: center; gap: 12px; }
   .gold-coin {
@@ -52,7 +948,6 @@
     color: #34d399; font-weight: 700; font-size: 12px; padding: 6px 10px; border-radius: 10px;
   }
 
-  /* Day 3/7 */
   .day-row { display: flex; align-items: center; justify-content: space-between; }
   .dots-row { display: flex; gap: 7px; }
   .dot-c {
@@ -62,7 +957,6 @@
   .dot-c.ok { background: #10b981; color: #052e16; }
   .dot-c.no { background: rgba(148, 163, 184, 0.14); color: #64748b; border: 1px solid rgba(148, 163, 184, 0.22); }
 
-  /* Spin Wheel with labels */
   .spin-head { display: flex; justify-content: space-between; align-items: flex-start; }
   .wheel-stage { position: relative; width: 248px; height: 248px; margin: 12px auto 12px; display: flex; align-items: center; justify-content: center; }
   .pointer-top {
@@ -125,7 +1019,6 @@
     display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
   }
 
-  /* Sessions & Tasks */
   .sess-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px; }
   .sess-pill {
     background: rgba(15, 25, 29, 0.95); border: 1px solid rgba(148, 163, 184, 0.16);
@@ -158,7 +1051,6 @@
     line-height: 1.45; margin-top: 10px;
   }
 
-  /* Mining */
   .m-top-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .m-stat {
     background: rgba(15, 25, 29, 0.94); border: 1px solid rgba(148, 163, 184, 0.15);
@@ -188,7 +1080,6 @@
   .active-lbl { font-size: 11px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.6px; }
   .active-clock { font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 2px; }
 
-  /* Games */
   .g-icon {
     width: 56px; height: 56px; border-radius: 14px;
     background: linear-gradient(145deg, #1e293b, #0f172a);
@@ -196,7 +1087,6 @@
     display: flex; align-items: center; justify-content: center; font-size: 25px; flex-shrink: 0;
   }
 
-  /* Wallet */
   .pin-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 6px; }
   .pin-box {
     height: 44px; border-radius: 12px; background: rgba(9, 17, 20, 0.92);
@@ -214,7 +1104,6 @@
     color: #ffffff; border-radius: 12px; padding: 11px 12px; font-size: 14px; margin-bottom: 10px;
   }
 
-  /* Bottom Nav: Home -> Tasks -> Mining -> Games -> Refer -> Wallet */
   .bnav {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
     background: rgba(10, 18, 22, 0.97); backdrop-filter: blur(12px);
@@ -248,7 +1137,6 @@
     <div class="muted" style="font-weight:700;" id="hdr-pts">0 PTS</div>
   </div>
 
-  <!-- HOME -->
   <section class="page active" id="page-home">
     <div class="card">
       <div class="bal-wrap">
@@ -334,7 +1222,6 @@
     </div>
   </section>
 
-  <!-- TASKS CENTER -->
   <section class="page" id="page-tasks">
     <div style="text-align:center;font-size:20px;font-weight:800;margin-bottom:12px;">Tasks Center</div>
     <div class="sess-5" id="sess-5"></div>
@@ -348,7 +1235,6 @@
     </div>
   </section>
 
-  <!-- MINING -->
   <section class="page" id="page-mining">
     <div style="text-align:center;margin-bottom:12px;">
       <div style="font-size:20px;font-weight:800;">TapMint Mining</div>
@@ -388,7 +1274,6 @@
     </div>
   </section>
 
-  <!-- GAMES ARENA -->
   <section class="page" id="page-games">
     <div style="text-align:center;margin-bottom:14px;">
       <div style="font-size:20px;font-weight:800;">Games Arena</div>
@@ -402,7 +1287,6 @@
     </div>
   </section>
 
-  <!-- REFER -->
   <section class="page" id="page-refer">
     <div class="card">
       <div style="font-size:18px;font-weight:800;margin-bottom:12px;">Referral Center</div>
@@ -425,7 +1309,6 @@
     </div>
   </section>
 
-  <!-- WALLET & WITHDRAW -->
   <section class="page" id="page-wallet">
     <div style="margin-bottom:12px;">
       <div style="font-size:20px;font-weight:800;">Wallet & Withdraw</div>
@@ -489,7 +1372,6 @@
   </section>
 </div>
 
-<!-- 3D BOTTOM NAV: Home -> Tasks -> Mining -> Games -> Refer -> Wallet -->
 <nav class="bnav">
   <div class="bnav-inner">
     <button class="bnav-item active" id="bi-home" onclick="goPage('home')"><span>🏠</span>Home</button>
@@ -866,4 +1748,195 @@ setInterval(() => {
 loadApp();
 </script>
 </body>
-</html>
+</html>"""
+
+
+ADMIN_3D_HTML = """<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TapMint 3D Admin Panel</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+  body {
+    background: radial-gradient(circle at 50% 0%, #162d34 0%, #091114 60%, #05090b 100%);
+    color: #f1f5f9; min-height: 100vh; padding: 16px;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  .panel-3d {
+    background: linear-gradient(180deg, rgba(23, 38, 44, 0.95), rgba(12, 21, 25, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 18px;
+    padding: 16px; margin-bottom: 14px;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat-3d {
+    background: rgba(11, 20, 24, 0.92); border: 1px solid rgba(52, 211, 153, 0.22);
+    border-radius: 14px; padding: 12px;
+  }
+  .stat-v { font-size: 22px; font-weight: 800; color: #34d399; margin-top: 4px; }
+  input, select {
+    width: 100%; background: rgba(8, 15, 18, 0.94); border: 1px solid rgba(148, 163, 184, 0.24);
+    color: #fff; border-radius: 12px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px;
+  }
+  .btn {
+    border: none; border-radius: 12px; padding: 10px 14px; font-weight: 800;
+    cursor: pointer; font-size: 13px;
+  }
+  .btn-g { background: linear-gradient(180deg, #4ade80, #22c55e); color: #052e16; }
+  .btn-r { background: #ef4444; color: #fff; }
+  .item-row {
+    background: rgba(10, 18, 22, 0.9); border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 12px; padding: 10px 12px; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel-3d">
+    <h2 style="font-size:20px;font-weight:800;">TapMint 3D Admin Panel • নোট খাতা</h2>
+    <p style="font-size:12px;color:#94a3b8;margin-top:4px;">Tier 3 Ad Revenue, Master Affiliate & নোট খাতা লেজার</p>
+    <div style="margin-top:12px;">
+      <input type="password" id="adm-key" placeholder="Enter TAPMINT_ADMIN_KEY" />
+      <button class="btn btn-g" onclick="loadPanel()">Load 3D Panel</button>
+    </div>
+  </div>
+
+  <div class="grid-4">
+    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Reserve Ledger</div><div class="stat-v" id="st-res">0</div></div>
+    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Total Users</div><div class="stat-v" id="st-usr">0</div></div>
+    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Master Affiliate</div><div class="stat-v" id="st-mref">0</div></div>
+    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Tier 3 Ad Units</div><div class="stat-v" id="st-t3">0</div></div>
+  </div>
+
+  <div class="panel-3d">
+    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">Pending Withdrawals</h3>
+    <div id="w-list"></div>
+  </div>
+
+  <div class="panel-3d">
+    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">নোট খাতা (Manual Entry)</h3>
+    <select id="nk-type">
+      <option value="tier3_ad_inflow">Tier 3 Ad Inflow</option>
+      <option value="withdraw_fee_inflow">Withdraw Fee Inflow</option>
+      <option value="withdraw_approved_outflow">Withdraw Approved Outflow</option>
+    </select>
+    <input type="number" id="nk-gross" placeholder="Gross PTS" value="0" />
+    <input type="number" id="nk-fee" placeholder="Fee PTS" value="0" />
+    <input type="number" id="nk-net" placeholder="Net PTS" value="0" />
+    <input type="text" id="nk-note" placeholder="নোট খাতার বিবরণ" />
+    <button class="btn btn-g" onclick="addKhata()">Save to নোট খাতা</button>
+  </div>
+
+  <div class="panel-3d">
+    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">নোট খাতা লেজার লগ</h3>
+    <div id="nk-list"></div>
+  </div>
+</div>
+
+<script>
+function getKey() {
+  return document.getElementById("adm-key").value.trim();
+}
+
+async function loadPanel() {
+  const k = getKey();
+  const r = await fetch("/api/admin/overview?admin_key=" + encodeURIComponent(k)).then(x => x.json());
+  if (!r.ok) return alert(r.error || "Unauthorized");
+
+  document.getElementById("st-res").textContent = r.reserve_balance_pts;
+  document.getElementById("st-usr").textContent = r.total_users;
+  document.getElementById("st-mref").textContent = r.master_affiliate_users;
+  document.getElementById("st-t3").textContent = r.tier3_ad_units;
+
+  const wl = document.getElementById("w-list");
+  wl.innerHTML = "";
+  if (!r.pending_withdrawals.length) {
+    wl.innerHTML = `<div style="font-size:13px;color:#94a3b8;">কোনো পেন্ডিং উইথড্র নেই</div>`;
+  } else {
+    for (const w of r.pending_withdrawals) {
+      const div = document.createElement("div");
+      div.className = "item-row";
+      div.innerHTML = `
+        <div>
+          <strong>#${w.id}</strong> • ${w.user_id} • ${w.method} (${w.account_target})<br/>
+          <span style="font-size:12px;color:#94a3b8;">Req: ${w.requested_pts} | Fee: ${w.fee_pts} | Net: ${w.net_pts}</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-g" onclick="reviewW(${w.id}, 'approve')">Approve</button>
+          <button class="btn btn-r" onclick="reviewW(${w.id}, 'reject')">Reject</button>
+        </div>
+      `;
+      wl.appendChild(div);
+    }
+  }
+
+  const kl = document.getElementById("nk-list");
+  kl.innerHTML = "";
+  for (const row of r.note_khata) {
+    const div = document.createElement("div");
+    div.className = "item-row";
+    div.innerHTML = `
+      <div>
+        <strong>[${row.entry_type}]</strong> ${row.ref_id} • ${row.note_text}<br/>
+        <span style="font-size:12px;color:#94a3b8;">Net: ${row.net_pts} | Reserve After: ${row.reserve_balance_pts}</span>
+      </div>
+      <div style="font-size:11px;color:#64748b;">${row.created_at}</div>
+    `;
+    kl.appendChild(div);
+  }
+}
+
+async function reviewW(wid, decision) {
+  const r = await fetch("/api/admin/withdraw/review", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": getKey() },
+    body: JSON.stringify({ withdraw_id: wid, decision })
+  }).then(x => x.json());
+  if (r.ok) loadPanel();
+  else alert(r.error || "Failed");
+}
+
+async function addKhata() {
+  const payload = {
+    entry_type: document.getElementById("nk-type").value,
+    gross_pts: parseInt(document.getElementById("nk-gross").value || "0", 10),
+    fee_pts: parseInt(document.getElementById("nk-fee").value || "0", 10),
+    net_pts: parseInt(document.getElementById("nk-net").value || "0", 10),
+    note_text: document.getElementById("nk-note").value.trim() || "নোট খাতা এন্ট্রি"
+  };
+  const r = await fetch("/api/admin/note-khata/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": getKey() },
+    body: JSON.stringify(payload)
+  }).then(x => x.json());
+  if (r.ok) {
+    document.getElementById("nk-note").value = "";
+    loadPanel();
+  } else {
+    alert(r.error || "Failed");
+  }
+}
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def index():
+    return MINI_APP_HTML
+
+
+@app.route("/admin")
+def admin_page():
+    return ADMIN_3D_HTML
+
+
+init_db()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
