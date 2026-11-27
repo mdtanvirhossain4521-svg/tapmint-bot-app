@@ -21,6 +21,7 @@ BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
 TASK_REWARD_PTS = 1
+GAME_REWARD_PTS = 3
 
 ADSTERRA_LINKS = [
     "https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7",
@@ -47,6 +48,8 @@ MONETAG_LINKS = [
     "https://uplcm.com/4/12351478",
     "https://uplcm.com/4/12351479",
 ]
+
+ALL_AD_LINKS = ADSTERRA_LINKS + MONETAG_LINKS
 
 # Build 100-task ad schedule across 5 sessions x 20 tasks using the 20 Adsterra & Monetag links
 TASK_SCHEDULE_100 = []
@@ -735,8 +738,7 @@ def api_game_start():
     user_id = (data.get("user_id") or "user_1001").strip()
     username = (data.get("username") or "TapMintUser").strip()
     game_name = (data.get("game_name") or "Tap Surge Combo").strip()[:64]
-    reward_pts = int(data.get("reward_pts") or 5)
-    reward_pts = max(1, min(reward_pts, 15))
+    ad_url = random.choice(ALL_AD_LINKS)
 
     conn = get_conn()
     try:
@@ -747,10 +749,16 @@ def api_game_start():
             INSERT INTO game_sessions (session_token, user_id, game_name, reward_pts, started_at, ad_verified, claimed)
             VALUES (?, ?, ?, ?, ?, 0, 0)
             """,
-            (token, user_id, game_name, reward_pts, iso_now()),
+            (token, user_id, game_name, GAME_REWARD_PTS, iso_now()),
         )
         conn.commit()
-        return jsonify({"ok": True, "session_token": token, "ad_required": True})
+        return jsonify({
+            "ok": True,
+            "session_token": token,
+            "reward_pts": GAME_REWARD_PTS,
+            "ad_required": True,
+            "ad_url": ad_url,
+        })
     finally:
         conn.close()
 
@@ -796,7 +804,7 @@ def api_game_claim():
         if int(row["ad_verified"]) != 1:
             return jsonify({"ok": False, "error": "Mandatory ad verification incomplete"}), 400
 
-        pts_earned = int(row["reward_pts"])
+        pts_earned = GAME_REWARD_PTS
         conn.execute("UPDATE game_sessions SET claimed = 1 WHERE session_token = ?", (token,))
         credit_user_pts(conn, user_id, f"game:{row['game_name']}", pts_earned, tier3_units=1)
         conn.commit()
@@ -1219,7 +1227,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .open-btn-3d {
     background: linear-gradient(180deg, #4ade80, #22c55e);
     color: #052e16; border: 1px solid #86efac; border-bottom: 3px solid #15803d;
-    border-radius: 12px; padding: 9px 14px; font-weight: 800;
+    border-radius: 12px; padding: 9px 13px; font-weight: 800;
     font-size: 12px; cursor: pointer; white-space: nowrap;
     box-shadow: 0 6px 14px rgba(34, 197, 94, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.55);
   }
@@ -1236,7 +1244,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
   }
 
-  /* Photo 1 Mining Design */
   .m-top-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .m-stat {
     background: linear-gradient(175deg, rgba(24, 41, 48, 0.96), rgba(12, 21, 26, 0.99));
@@ -1313,13 +1320,58 @@ MINI_APP_HTML = """<!DOCTYPE html>
     line-height: 1.45; box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
   }
 
-  .g-thumb {
-    width: 60px; height: 60px; border-radius: 15px;
-    background: linear-gradient(145deg, #273549, #0b1318);
-    border: 1px solid rgba(148, 163, 184, 0.28);
-    border-bottom: 3px solid #060a0d;
-    box-shadow: 0 7px 15px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.14);
-    display: flex; align-items: center; justify-content: center; font-size: 27px; flex-shrink: 0;
+  /* Photo 2 3D Game Arena Style */
+  .g-3d-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 11px;
+    background: linear-gradient(175deg, rgba(31, 50, 58, 0.96) 0%, rgba(15, 26, 31, 0.99) 55%, rgba(10, 17, 21, 1) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-bottom: 4px solid rgba(4, 9, 12, 0.95);
+    border-radius: 18px; padding: 13px; margin-bottom: 11px;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.6), inset 0 1.5px 0 rgba(255, 255, 255, 0.12);
+  }
+  .g-3d-thumb {
+    width: 62px; height: 62px; border-radius: 16px;
+    background: linear-gradient(155deg, #2d3e54 0%, #111b24 68%, #070c10 100%);
+    border: 1.5px solid rgba(148, 163, 184, 0.32);
+    border-bottom: 4px solid #04070a;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.65), inset 0 2px 3px rgba(255, 255, 255, 0.18);
+    display: flex; align-items: center; justify-content: center; font-size: 28px; flex-shrink: 0;
+  }
+  .g-play-3d {
+    background: linear-gradient(180deg, #4ade80 0%, #22c55e 65%, #16a34a 100%);
+    color: #052e16; border: 1px solid #86efac; border-bottom: 4px solid #15803d;
+    border-radius: 13px; padding: 10px 13px; font-weight: 800;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+    box-shadow: 0 7px 16px rgba(34, 197, 94, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+  .g-play-3d:active { transform: translateY(2px); border-bottom-width: 2px; }
+  .g-notice-warm {
+    background: linear-gradient(180deg, rgba(66, 53, 33, 0.78), rgba(45, 36, 23, 0.86));
+    border: 1px solid rgba(217, 167, 96, 0.32);
+    color: #f3e8d2; border-radius: 14px; padding: 11px 12px; font-size: 12px;
+    line-height: 1.45; margin-top: 8px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
+  }
+
+  /* Playable Game & Ad Modal */
+  .modal-bg {
+    position: fixed; inset: 0; z-index: 80;
+    background: rgba(3, 8, 11, 0.9); backdrop-filter: blur(8px);
+    display: none; align-items: center; justify-content: center; padding: 14px;
+  }
+  .modal-bg.open { display: flex; }
+  .modal-box {
+    width: 100%; max-width: 400px;
+    background: linear-gradient(175deg, #1b313a 0%, #0d181d 100%);
+    border: 1px solid rgba(148, 163, 184, 0.28); border-bottom: 4px solid #05090c;
+    border-radius: 20px; padding: 16px;
+    box-shadow: 0 20px 44px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  }
+  .game-arena-box {
+    position: relative; width: 100%; height: 230px; border-radius: 15px;
+    background: radial-gradient(circle at 50% 35%, #16323b 0%, #081216 100%);
+    border: 1px solid rgba(52, 211, 153, 0.3); overflow: hidden;
+    margin: 10px 0 12px; user-select: none; touch-action: manipulation;
   }
 
   .pin-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 6px; }
@@ -1374,6 +1426,43 @@ MINI_APP_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="toast" id="toast"></div>
+
+<div class="modal-bg" id="game-modal">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-size:17px;font-weight:800;" id="gm-title">Game</div>
+        <div style="font-size:12px;color:#34d399;font-weight:700;" id="gm-target">Target: 50+ • Reward: +3 PTS</div>
+      </div>
+      <button class="pay-btn-3d" style="padding:6px 10px;" onclick="closeGameModal()">✕</button>
+    </div>
+
+    <div id="gm-play-stage">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;margin-top:8px;">
+        <span id="gm-score-lbl">Score: 0</span>
+        <span id="gm-time-lbl">Time: 18s</span>
+      </div>
+      <div class="game-arena-box" id="gm-arena"></div>
+      <div id="gm-ctrl-bar" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px;"></div>
+      <button class="btn-3d-green" id="gm-action-btn" onclick="handleGameStageButton()">Restart Game</button>
+    </div>
+
+    <div id="gm-ad-stage" style="display:none;text-align:center;padding:8px 0;">
+      <div style="font-size:12px;font-weight:800;color:#fbbf24;letter-spacing:0.6px;">SPONSORED AD REQUIRED</div>
+      <div style="font-size:16px;font-weight:800;margin-top:4px;">টার্গেট সম্পন্ন হয়েছে! +3 PTS নিতে অ্যাড দেখুন</div>
+      <div style="background:rgba(8,15,19,0.9);border:1px solid rgba(52,211,153,0.35);border-radius:14px;padding:14px;margin:12px 0;">
+        <div style="font-size:13px;color:#cbd5e1;margin-bottom:8px;">বিজ্ঞাপন লিংক খুলে দেখুন অথবা নিচের কাউন্টডাউন শেষ করুন:</div>
+        <a id="gm-ad-link" href="#" target="_blank" rel="noopener noreferrer"
+           style="display:inline-block;background:rgba(56,189,248,0.18);border:1px solid #38bdf8;color:#7dd3fc;padding:7px 12px;border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;">
+          🔗 Open Ad Sponsor Link
+        </a>
+        <div style="font-size:20px;font-weight:900;color:#4ade80;margin-top:10px;" id="gm-ad-timer">Ad Verifying: 5s</div>
+      </div>
+      <button class="btn-3d-green" id="gm-claim-btn" disabled onclick="claimGameReward()">Claim +3 PTS</button>
+    </div>
+  </div>
+</div>
+
 <div class="phone-frame">
   <div class="tg-top">
     <div>
@@ -1533,7 +1622,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div id="game-rows"></div>
-    <div class="alert-box">
+    <div class="g-notice-warm">
       🎮 প্রতিটি গেম শেষ করার পর পয়েন্ট পেতে অ্যাড দেখা বাধ্যতামূলক
     </div>
   </section>
@@ -2013,61 +2102,285 @@ async function doMining() {
   }
 }
 
+const GAMES_CONFIG = [
+  { ico: "🕹", title: "Tap Surge Combo", tgtText: "Score Target: 50+", targetVal: 50, pts: 3, mode: "tap" },
+  { ico: "👾", title: "Catch & Dodge 3D", tgtText: "Score Target: 20+", targetVal: 20, pts: 3, mode: "catch" },
+  { ico: "🔢", title: "Number Merge 2048", tgtText: "Target: 512+ Tile", targetVal: 60, pts: 3, mode: "merge" },
+  { ico: "🐍", title: "Neon Snake Arcade", tgtText: "Score Target: 30+", targetVal: 30, pts: 3, mode: "snake" },
+];
+
 function drawGames() {
-  const arr = [
-    { ico: "🕹", title: "Tap Surge Combo", tgt: "Score Target: 50+", pts: 5 },
-    { ico: "👾", title: "Catch & Dodge 3D", tgt: "Score Target: 20+", pts: 5 },
-    { ico: "🔢", title: "Number Merge 2048", tgt: "Target: 512+ Tile", pts: 6 },
-    { ico: "🐍", title: "Neon Snake Arcade", tgt: "Score Target: 30+", pts: 5 },
-  ];
   const box = document.getElementById("game-rows");
   box.innerHTML = "";
-  for (const g of arr) {
+  for (const g of GAMES_CONFIG) {
     const el = document.createElement("div");
-    el.className = "row-card-3d";
+    el.className = "g-3d-card";
     el.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;">
-        <div class="g-thumb">${g.ico}</div>
+        <div class="g-3d-thumb">${g.ico}</div>
         <div>
-          <div style="font-weight:800;font-size:15px;">${g.title}</div>
-          <div class="muted">${g.tgt}</div>
-          <div style="font-size:12px;color:#34d399;font-weight:700;">Reward: +${g.pts} PTS (Ad Required)</div>
+          <div style="font-weight:800;font-size:15px;color:#ffffff;">${g.title}</div>
+          <div class="muted" style="margin-top:2px;">${g.tgtText}</div>
+          <div style="font-size:12px;color:#34d399;font-weight:700;margin-top:2px;">Reward: +${g.pts} PTS (Ad Required)</div>
           <div style="font-size:11px;color:#64748b;margin-top:2px;">বিজ্ঞাপন দেখার পর পয়েন্ট অ্যাকাউন্টে যোগ হবে</div>
         </div>
       </div>
-      <button class="open-btn-3d" onclick="runGame('${g.title}',${g.pts})">Play Fullscreen</button>
+      <button class="g-play-3d" onclick="openPlayableGame('${g.title}')">Play Fullscreen</button>
     `;
     box.appendChild(el);
   }
 }
 
-async function runGame(name, pts) {
+let GM = {
+  cfg: null,
+  token: "",
+  score: 0,
+  timeLeft: 18,
+  timerIv: null,
+  spawnIv: null,
+  finished: false,
+  catcherX: 140,
+  snake: [{ x: 6, y: 4 }],
+  snakeDir: { x: 1, y: 0 },
+  food: { x: 10, y: 4 },
+};
+
+function clearGameTimers() {
+  if (GM.timerIv) clearInterval(GM.timerIv);
+  if (GM.spawnIv) clearInterval(GM.spawnIv);
+  GM.timerIv = null;
+  GM.spawnIv = null;
+}
+
+function closeGameModal() {
+  clearGameTimers();
+  document.getElementById("game-modal").classList.remove("open");
+}
+
+async function openPlayableGame(title) {
+  const cfg = GAMES_CONFIG.find(x => x.title === title) || GAMES_CONFIG[0];
   const st = await fetch("/api/game/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME, game_name: name, reward_pts: pts })
+    body: JSON.stringify({ user_id: USER, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
   }).then(x => x.json());
-  if (!st.ok) return notify(st.error);
+  if (!st.ok) return notify(st.error || "Cannot start game");
 
-  notify("গেম চলছে... পয়েন্ট পেতে অ্যাড দেখুন");
-  setTimeout(async () => {
-    await fetch("/api/game/ad-complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: USER, session_token: st.session_token })
-    });
-    const cl = await fetch("/api/game/claim", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: USER, session_token: st.session_token })
-    }).then(x => x.json());
-    if (cl.ok) {
-      notify(`+${cl.pts_earned} PTS earned!`);
-      await loadApp();
-    } else {
-      notify(cl.error || "Ad required");
+  clearGameTimers();
+  GM.cfg = cfg;
+  GM.token = st.session_token;
+  GM.score = 0;
+  GM.timeLeft = 18;
+  GM.finished = false;
+
+  document.getElementById("gm-title").textContent = cfg.title;
+  document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
+  document.getElementById("gm-ad-link").href = st.ad_url || "#";
+  document.getElementById("gm-play-stage").style.display = "block";
+  document.getElementById("gm-ad-stage").style.display = "none";
+  document.getElementById("game-modal").classList.add("open");
+
+  initGameMode();
+}
+
+function handleGameStageButton() {
+  if (!GM.cfg) return;
+  openPlayableGame(GM.cfg.title);
+}
+
+function updateGmHud() {
+  document.getElementById("gm-score-lbl").textContent = `Score: ${GM.score} / ${GM.cfg.targetVal}`;
+  document.getElementById("gm-time-lbl").textContent = `Time: ${GM.timeLeft}s`;
+}
+
+function initGameMode() {
+  const arena = document.getElementById("gm-arena");
+  const ctrl = document.getElementById("gm-ctrl-bar");
+  arena.innerHTML = "";
+  ctrl.innerHTML = "";
+  updateGmHud();
+
+  if (GM.cfg.mode === "tap") {
+    arena.innerHTML = `
+      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <button id="tap-3d-target" style="width:126px;height:126px;border-radius:50%;border:3px solid #86efac;border-bottom:6px solid #15803d;background:radial-gradient(circle at 30% 25%,#4ade80,#16a34a);color:#052e16;font-weight:900;font-size:18px;cursor:pointer;box-shadow:0 12px 24px rgba(34,197,94,0.4);">
+          TAP +5
+        </button>
+        <div class="muted" style="margin-top:10px;">দ্রুত ট্যাপ করে ${GM.cfg.targetVal}+ স্কোর করুন</div>
+      </div>
+    `;
+    document.getElementById("tap-3d-target").onclick = () => {
+      if (GM.finished) return;
+      GM.score += 5;
+      updateGmHud();
+      if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
+    };
+  } else if (GM.cfg.mode === "catch") {
+    GM.catcherX = 125;
+    arena.innerHTML = `
+      <div id="catcher-p" style="position:absolute;bottom:10px;left:${GM.catcherX}px;width:54px;height:24px;border-radius:10px;background:linear-gradient(180deg,#4ade80,#15803d);border:1px solid #bbf7d0;display:flex;align-items:center;justify-content:center;font-weight:900;color:#052e16;font-size:12px;">🧺</div>
+    `;
+    ctrl.innerHTML = `
+      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(-38)">⬅ Left</button>
+      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(38)">Right ➡</button>
+    `;
+    GM.spawnIv = setInterval(() => {
+      if (GM.finished) return;
+      const drop = document.createElement("div");
+      const isBomb = Math.random() < 0.24;
+      let dx = Math.floor(Math.random() * 270) + 12;
+      let dy = 8;
+      drop.textContent = isBomb ? "💣" : "🪙";
+      drop.style.cssText = `position:absolute;top:${dy}px;left:${dx}px;font-size:22px;`;
+      arena.appendChild(drop);
+
+      const fallIv = setInterval(() => {
+        if (GM.finished) { clearInterval(fallIv); return; }
+        dy += 14;
+        drop.style.top = dy + "px";
+        if (dy >= 175 && dy <= 212 && Math.abs(dx - GM.catcherX) < 34) {
+          clearInterval(fallIv);
+          drop.remove();
+          if (isBomb) {
+            GM.score = Math.max(0, GM.score - 5);
+          } else {
+            GM.score += 5;
+          }
+          updateGmHud();
+          if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
+        } else if (dy > 225) {
+          clearInterval(fallIv);
+          drop.remove();
+        }
+      }, 90);
+    }, 680);
+  } else if (GM.cfg.mode === "merge") {
+    arena.innerHTML = `
+      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
+        <div style="display:flex;gap:10px;">
+          <button class="open-btn-3d" onclick="mergeTile(12)">[ 12 ]</button>
+          <button class="open-btn-3d" onclick="mergeTile(12)">[ 12 ]</button>
+          <button class="open-btn-3d" onclick="mergeTile(15)">[ 15 ]</button>
+        </div>
+        <div class="muted">একই মানের টাইল মিলিয়ে ${GM.cfg.targetVal}+ স্কোর করুন</div>
+      </div>
+    `;
+  } else if (GM.cfg.mode === "snake") {
+    GM.snake = [{ x: 5, y: 4 }];
+    GM.snakeDir = { x: 1, y: 0 };
+    GM.food = { x: 11, y: 4 };
+    ctrl.innerHTML = `
+      <button class="pay-btn-3d" onclick="setSnakeDir(0,-1)">▲</button>
+      <button class="pay-btn-3d" onclick="setSnakeDir(0,1)">▼</button>
+      <button class="pay-btn-3d" onclick="setSnakeDir(-1,0)">◀</button>
+      <button class="pay-btn-3d" onclick="setSnakeDir(1,0)">▶</button>
+    `;
+    renderSnakeBoard(arena);
+    GM.spawnIv = setInterval(() => {
+      if (GM.finished) return;
+      const head = GM.snake[0];
+      const nx = (head.x + GM.snakeDir.x + 16) % 16;
+      const ny = (head.y + GM.snakeDir.y + 9) % 9;
+      GM.snake.unshift({ x: nx, y: ny });
+      if (nx === GM.food.x && ny === GM.food.y) {
+        GM.score += 10;
+        GM.food = { x: Math.floor(Math.random() * 15), y: Math.floor(Math.random() * 8) };
+        updateGmHud();
+        if (GM.score >= GM.cfg.targetVal) {
+          triggerGameAdStage();
+          return;
+        }
+      } else {
+        GM.snake.pop();
+      }
+      renderSnakeBoard(arena);
+    }, 260);
+  }
+
+  GM.timerIv = setInterval(() => {
+    if (GM.finished) return;
+    GM.timeLeft -= 1;
+    updateGmHud();
+    if (GM.timeLeft <= 0) {
+      if (GM.score >= GM.cfg.targetVal) {
+        triggerGameAdStage();
+      } else {
+        clearGameTimers();
+        notify(`সময় শেষ! টার্গেট ${GM.cfg.targetVal} পূরণ করতে আবার খেলুন`);
+      }
     }
-  }, 3200);
+  }, 1000);
+}
+
+function moveCatcher(dx) {
+  GM.catcherX = Math.max(8, Math.min(285, GM.catcherX + dx));
+  const el = document.getElementById("catcher-p");
+  if (el) el.style.left = GM.catcherX + "px";
+}
+
+function mergeTile(val) {
+  if (GM.finished) return;
+  GM.score += val;
+  updateGmHud();
+  if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
+}
+
+function setSnakeDir(x, y) {
+  GM.snakeDir = { x, y };
+}
+
+function renderSnakeBoard(arena) {
+  let html = `<div style="position:relative;width:100%;height:100%;">`;
+  html += `<div style="position:absolute;left:${GM.food.x * 20 + 6}px;top:${GM.food.y * 22 + 4}px;font-size:16px;">🟢</div>`;
+  GM.snake.forEach((seg, idx) => {
+    html += `<div style="position:absolute;left:${seg.x * 20 + 6}px;top:${seg.y * 22 + 4}px;width:16px;height:16px;border-radius:5px;background:${idx === 0 ? "#4ade80" : "#22c55e"};"></div>`;
+  });
+  html += `</div>`;
+  arena.innerHTML = html;
+}
+
+async function triggerGameAdStage() {
+  if (GM.finished) return;
+  GM.finished = true;
+  clearGameTimers();
+
+  document.getElementById("gm-play-stage").style.display = "none";
+  document.getElementById("gm-ad-stage").style.display = "block";
+  const claimBtn = document.getElementById("gm-claim-btn");
+  claimBtn.disabled = true;
+
+  let secLeft = 5;
+  document.getElementById("gm-ad-timer").textContent = `Ad Verifying: ${secLeft}s`;
+  const adIv = setInterval(async () => {
+    secLeft -= 1;
+    if (secLeft > 0) {
+      document.getElementById("gm-ad-timer").textContent = `Ad Verifying: ${secLeft}s`;
+    } else {
+      clearInterval(adIv);
+      await fetch("/api/game/ad-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: USER, session_token: GM.token })
+      });
+      document.getElementById("gm-ad-timer").textContent = "Ad Verified ✓ Ready to Claim!";
+      claimBtn.disabled = false;
+    }
+  }, 1000);
+}
+
+async function claimGameReward() {
+  const cl = await fetch("/api/game/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+  }).then(x => x.json());
+  if (cl.ok) {
+    closeGameModal();
+    notify(`+${cl.pts_earned} PTS earned!`);
+    await loadApp();
+  } else {
+    notify(cl.error || "Claim failed");
+  }
 }
 
 function copyRef() {
