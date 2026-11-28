@@ -1149,14 +1149,55 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
   .bal-wrap { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .bal-left { display: flex; align-items: center; gap: 12px; }
-  .gold-coin {
-    width: 48px; height: 48px; border-radius: 50%;
-    background: radial-gradient(circle at 30% 24%, #fef9c3 0%, #facc15 36%, #d97706 78%, #78350f 100%);
-    border: 2.5px solid #fef08a;
-    box-shadow: 0 7px 18px rgba(245, 158, 11, 0.42), 0 3px 0 #92400e, inset 0 2px 5px rgba(255, 255, 255, 0.8);
-    display: flex; align-items: center; justify-content: center;
-    font-weight: 900; font-size: 20px; color: #78350f; flex-shrink: 0;
+
+  /* 3D Glossy PTS Coin */
+  @keyframes coinShine {
+    0%, 72% { transform: translateX(-165%) rotate(25deg); opacity: 0; }
+    82% { opacity: 0.9; }
+    100% { transform: translateX(185%) rotate(25deg); opacity: 0; }
   }
+  .pts-coin-3d {
+    position: relative;
+    width: 54px; height: 54px; border-radius: 50%;
+    background: radial-gradient(circle at 28% 20%, #fffbeb 0%, #fde047 26%, #eab308 58%, #9a3412 92%, #451a03 100%);
+    border: 2.5px solid #fef08a;
+    box-shadow:
+      0 9px 20px rgba(245, 158, 11, 0.45),
+      0 4px 0 #78350f,
+      0 0 18px rgba(250, 204, 21, 0.28),
+      inset 0 2px 4px rgba(255, 255, 255, 0.85),
+      inset 0 -3px 6px rgba(120, 53, 15, 0.75);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; overflow: hidden;
+  }
+  .pts-coin-3d::after {
+    content: "";
+    position: absolute; top: -35%; left: -35%; width: 52%; height: 170%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+    animation: coinShine 3.6s infinite;
+    pointer-events: none;
+  }
+  .pts-coin-inner {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 25%, #fbbf24 0%, #d97706 65%, #78350f 100%);
+    border: 1.5px dashed rgba(254, 249, 195, 0.75);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    line-height: 1;
+  }
+  .pts-coin-star {
+    font-size: 8px; color: #fef9c3; letter-spacing: 0.5px; margin-bottom: 1px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  }
+  .pts-coin-txt {
+    font-size: 11px; font-weight: 900; color: #fffbeb; letter-spacing: 0.4px;
+    text-shadow: 0 1.5px 2px rgba(69, 26, 3, 0.95);
+  }
+  .pts-coin-3d.sm { width: 42px; height: 42px; }
+  .pts-coin-3d.sm .pts-coin-inner { width: 32px; height: 32px; }
+  .pts-coin-3d.sm .pts-coin-star { font-size: 7px; }
+  .pts-coin-3d.sm .pts-coin-txt { font-size: 9.5px; }
+
   .muted { color: #94a3b8; font-size: 12px; }
   .pts-big { font-size: 27px; font-weight: 800; color: #ffffff; line-height: 1.15; letter-spacing: -0.3px; }
   .boost-btn {
@@ -1612,7 +1653,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div class="card-3d">
       <div class="bal-wrap">
         <div class="bal-left">
-          <div class="gold-coin">1</div>
+          <div class="pts-coin-3d">
+            <div class="pts-coin-inner">
+              <div class="pts-coin-star">✦✦✦</div>
+              <div class="pts-coin-txt">PTS</div>
+            </div>
+          </div>
           <div>
             <div class="muted">Available Balance</div>
             <div class="pts-big" id="home-bal">0 PTS</div>
@@ -1816,7 +1862,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div class="card-3d" style="text-align:center;">
       <div class="muted" style="margin-bottom:6px;">Available Balance</div>
       <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
-        <div class="gold-coin" style="width:36px;height:36px;font-size:15px;">1</div>
+        <div class="pts-coin-3d sm">
+          <div class="pts-coin-inner">
+            <div class="pts-coin-star">✦✦✦</div>
+            <div class="pts-coin-txt">PTS</div>
+          </div>
+        </div>
         <div style="font-size:26px;font-weight:800;" id="w-bal">0 PTS</div>
       </div>
     </div>
