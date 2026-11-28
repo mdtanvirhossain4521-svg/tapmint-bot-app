@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, make_response, request
 
 app = Flask(__name__)
 
@@ -110,6 +110,19 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
+
+
+@app.after_request
+def add_cors_headers(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-User-Id, X-Username, X-Telegram-Id, X-Telegram-Username, X-Telegram-Init-Data, X-Admin-Key"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return resp
+
+
+@app.route("/api/<path:subpath>", methods=["OPTIONS"])
+def api_options(subpath):
+    return make_response("", 204)
 
 
 def hash_pin(pin: str) -> str:
@@ -794,6 +807,8 @@ def api_bootstrap():
             return jsonify({"ok": False, "error": "New user registration paused by admin"}), 403
         conn.commit()
         return jsonify(build_bootstrap(conn, ident["user_id"]))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Bootstrap error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -808,7 +823,7 @@ def api_spin():
         ensure_user_from_identity(conn, ident)
         sp = conn.execute("SELECT * FROM spin_state WHERE user_id = ?", (user_id,)).fetchone()
         if int(sp["spins_used_today"]) >= 1:
-            return jsonify({"ok": False, "error": "Daily spin already used today"}), 400
+            return jsonify({"ok": False, "error": "আজকের ডেইলি স্পিন শেষ হয়ে গেছে"}), 400
 
         outcomes = [
             ("1 PTS", 1, 26),
@@ -853,6 +868,8 @@ def api_spin():
             "spin_streak_days": new_streak,
             "next_spin_at": next_at,
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Server spin error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -906,6 +923,8 @@ def api_task_open():
             "launch_url": launch_url,
             "provider": ad_info["provider"],
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Task open error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -948,8 +967,8 @@ def api_task_complete():
 
         opened_dt = parse_iso(st["opened_at"])
         elapsed = (now_utc() - opened_dt).total_seconds() if opened_dt else 0
-        if elapsed < 8.0:
-            return jsonify({"ok": False, "error": f"Wait at least 8-10s ({int(8 - elapsed)}s left)"}), 400
+        if elapsed < 7.5:
+            return jsonify({"ok": False, "error": f"Wait at least 8-10s ({max(1, int(8 - elapsed))}s left)"}), 400
 
         ts = iso_now()
         conn.execute(
@@ -989,6 +1008,8 @@ def api_task_complete():
             "completed_in_session": int(new_cnt),
             "session_locked": session_locked_now,
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Task complete error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -1025,6 +1046,8 @@ def api_mining_claim():
             "claims_today": claims_today + 1,
             "next_claim_at": next_claim_at,
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Mining claim error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -1060,6 +1083,8 @@ def api_game_start():
             "wait_seconds_min": 8,
             "wait_seconds_max": 10,
         })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Game start error: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -1107,8 +1132,8 @@ def api_game_ad_complete():
         if not ad_start_dt:
             return jsonify({"ok": False, "error": "Ad not launched yet"}), 400
         elapsed = (now_utc() - ad_start_dt).total_seconds()
-        if elapsed < GAME_AD_MIN_WAIT_SEC:
-            rem = max(1, int(GAME_AD_MIN_WAIT_SEC - elapsed + 0.99))
+        if elapsed < 7.5:
+            rem = max(1, int(8 - elapsed + 0.99))
             return jsonify({"ok": False, "error": f"অ্যাডে ৮-১০ সেকেন্ড অপেক্ষা করুন ({rem}s বাকি)"}), 400
 
         conn.execute(
@@ -1141,8 +1166,8 @@ def api_game_claim():
         if not ad_start_dt:
             return jsonify({"ok": False, "error": "আগে অ্যাড খুলুন ও ৮-১০ সেকেন্ড অপেক্ষা করুন"}), 400
         elapsed = (now_utc() - ad_start_dt).total_seconds()
-        if elapsed < GAME_AD_MIN_WAIT_SEC:
-            rem = max(1, int(GAME_AD_MIN_WAIT_SEC - elapsed + 0.99))
+        if elapsed < 7.5:
+            rem = max(1, int(8 - elapsed + 0.99))
             return jsonify({"ok": False, "error": f"আরও {rem} সেকেন্ড অপেক্ষা করে ফিরে আসুন"}), 400
 
         pts_earned = int(row["reward_pts"] or DEFAULT_GAME_REWARD_PTS)
@@ -1173,7 +1198,6 @@ def api_wallet_connect():
     conn = get_conn()
     try:
         ensure_user_from_identity(conn, ident)
-
         dup = conn.execute(
             """
             SELECT user_id FROM wallets
@@ -2095,6 +2119,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
     position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 95;
     background: #132a30; border: 1px solid #34d399; color: #ecfdf5;
     padding: 10px 16px; border-radius: 12px; font-size: 13px; font-weight: 700; display: none;
+    max-width: 92vw; text-align: center;
   }
   .acct-detail-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -2492,6 +2517,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 </nav>
 
 <script>
+const API_BASE = window.location.origin;
 const qp = new URLSearchParams(window.location.search);
 const tgWebApp = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
 if (tgWebApp) {
@@ -2530,6 +2556,39 @@ function authHeaders(extra) {
   if (TG_USERNAME) h["X-Telegram-Username"] = TG_USERNAME;
   if (TG_INIT_DATA) h["X-Telegram-Init-Data"] = TG_INIT_DATA;
   return h;
+}
+
+function withIdentityBody(extraBody) {
+  return Object.assign({
+    user_id: USER,
+    tg_id: TG_ID,
+    tg_username: TG_USERNAME,
+    init_data: TG_INIT_DATA,
+    username: NAME,
+  }, extraBody || {});
+}
+
+async function apiPost(path, bodyObj, fallbackLabel) {
+  try {
+    const res = await fetch(API_BASE + path, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(withIdentityBody(bodyObj)),
+    });
+    const text = await res.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      return { ok: false, error: `${fallbackLabel} (HTTP ${res.status})` };
+    }
+    if (!res.ok && !data.error) {
+      return { ok: false, error: `${fallbackLabel} (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err) {
+    return { ok: false, error: `${fallbackLabel}: ${err && err.message ? err.message : "connection failed"}` };
+  }
 }
 
 const DEFAULT_SESSIONS = [1, 2, 3, 4, 5].map(n => ({
@@ -2578,7 +2637,7 @@ function notify(t) {
   el.textContent = t;
   el.style.display = "block";
   clearTimeout(window._nt);
-  window._nt = setTimeout(() => { el.style.display = "none"; }, 3000);
+  window._nt = setTimeout(() => { el.style.display = "none"; }, 3200);
 }
 
 function openAccountModal() {
@@ -2833,7 +2892,7 @@ function draw() {
     document.getElementById("ref-act").textContent = actCount;
     document.getElementById("ref-pts").textContent = `+${boostPct}% Boost`;
     const refParam = u.telegram_id ? ("tg_" + u.telegram_id) : (u.user_id || USER);
-    document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(refParam)}`;
+    document.getElementById("ref-url").value = `${API_BASE}/?ref=${encodeURIComponent(refParam)}`;
 
     if (ST.wallet && ST.wallet.connected) {
       document.getElementById("w-conn").textContent =
@@ -2934,95 +2993,66 @@ function drawTasks() {
 async function startTask(sNum, tNum) {
   const btn = document.getElementById(`ot-${sNum}-${tNum}`);
   if (btn) btn.disabled = true;
-  try {
-    const op = await fetch("/api/task/open", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
-    }).then(r => r.json());
-    if (!op.ok) {
-      notify(op.error || "Cannot open task");
-      if (btn) btn.disabled = false;
-      return;
-    }
-    if (op.launch_url) {
-      window.open(op.launch_url, "_blank", "noopener,noreferrer");
-    }
-    let left = 9;
-    if (btn) btn.textContent = `${left}s`;
-    const iv = setInterval(async () => {
-      left -= 1;
-      if (left > 0) {
-        if (btn) btn.textContent = `${left}s`;
-      } else {
-        clearInterval(iv);
-        if (btn) btn.textContent = "Claiming...";
-        const cp = await fetch("/api/task/complete", {
-          method: "POST",
-          headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
-        }).then(r => r.json());
-        if (cp.ok) {
-          notify(`+${cp.pts_earned} PTS earned!`);
-          await loadApp();
-        } else {
-          notify(cp.error || "Task failed");
-          if (btn) { btn.disabled = false; btn.textContent = "Open Task"; }
-        }
-      }
-    }, 1000);
-  } catch (_) {
-    if (btn) { btn.disabled = false; btn.textContent = "Open Task"; }
-    notify("Network error");
+  const op = await apiPost("/api/task/open", { session_num: sNum, task_num: tNum }, "Task open error");
+  if (!op.ok) {
+    notify(op.error || "Cannot open task");
+    if (btn) btn.disabled = false;
+    return;
   }
+  if (op.launch_url) {
+    try { window.open(op.launch_url, "_blank", "noopener,noreferrer"); } catch (_) {}
+  }
+  let left = 9;
+  if (btn) btn.textContent = `${left}s`;
+  const iv = setInterval(async () => {
+    left -= 1;
+    if (left > 0) {
+      if (btn) btn.textContent = `${left}s`;
+    } else {
+      clearInterval(iv);
+      if (btn) btn.textContent = "Claiming...";
+      const cp = await apiPost("/api/task/complete", { session_num: sNum, task_num: tNum }, "Task network error");
+      if (cp.ok) {
+        notify(`+${cp.pts_earned} PTS earned!`);
+        await loadApp();
+      } else {
+        notify(cp.error || "Task failed");
+        if (btn) { btn.disabled = false; btn.textContent = "Open Task"; }
+      }
+    }
+  }, 1000);
 }
 
 async function doSpin() {
-  try {
-    const r = await fetch("/api/spin", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
-    }).then(x => x.json());
-    if (!r.ok) return notify(r.error || "Spin not ready");
+  const r = await apiPost("/api/spin", {}, "Spin error");
+  if (!r.ok) return notify(r.error || "Spin not ready");
 
-    const sliceDeg = 360 / WHEEL_SLOTS.length;
-    const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
-    const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
-    const baseMod = ((DEG % 360) + 360) % 360;
-    const desiredMod = (360 - targetCenter) % 360;
-    const deltaMod = (desiredMod - baseMod + 360) % 360;
-    DEG += 1080 + deltaMod;
+  const sliceDeg = 360 / WHEEL_SLOTS.length;
+  const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
+  const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
+  const baseMod = ((DEG % 360) + 360) % 360;
+  const desiredMod = (360 - targetCenter) % 360;
+  const deltaMod = (desiredMod - baseMod + 360) % 360;
+  DEG += 1080 + deltaMod;
 
-    document.getElementById("wheel-rotor").style.transform = `rotate(${DEG}deg)`;
-    document.getElementById("spin-msg").textContent = r.pts_earned > 0
-      ? `${r.slot} (+${r.pts_earned} PTS)`
-      : "Try Again (+0 PTS)";
+  document.getElementById("wheel-rotor").style.transform = `rotate(${DEG}deg)`;
+  document.getElementById("spin-msg").textContent = r.pts_earned > 0
+    ? `${r.slot} (+${r.pts_earned} PTS)`
+    : "Try Again (+0 PTS)";
 
-    setTimeout(async () => {
-      notify(r.pts_earned > 0 ? `+${r.pts_earned} PTS added!` : "Try Again today!");
-      await loadApp();
-    }, 2500);
-  } catch (_) {
-    notify("Spin error");
-  }
+  setTimeout(async () => {
+    notify(r.pts_earned > 0 ? `+${r.pts_earned} PTS added!` : "Try Again today!");
+    await loadApp();
+  }, 2500);
 }
 
 async function doMining() {
-  try {
-    const r = await fetch("/api/mining/claim", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
-    }).then(x => x.json());
-    if (r.ok) {
-      notify(`+${r.pts_earned} PTS mined!`);
-      await loadApp();
-    } else {
-      notify(r.error || "Mining not ready");
-    }
-  } catch (_) {
-    notify("Mining error");
+  const r = await apiPost("/api/mining/claim", {}, "Mining error");
+  if (r.ok) {
+    notify(`+${r.pts_earned} PTS mined!`);
+    await loadApp();
+  } else {
+    notify(r.error || "Mining not ready");
   }
 }
 
@@ -3059,7 +3089,7 @@ function drawGames() {
 let GM = {
   cfg: null, token: "", adUrl: "", score: 0, timeLeft: 16,
   timerIv: null, spawnIv: null, adTimerIv: null,
-  adOpenedAtMs: 0, leftAdWindow: false, finished: false,
+  adOpenedAtMs: 0, finished: false,
   catcherX: 135, mergePair: [16, 16],
   snake: [{ x: 5, y: 4 }], snakeDir: { x: 1, y: 0 },
   food: { x: 11, y: 4 }, hazard: { x: 8, y: 2 },
@@ -3079,35 +3109,26 @@ function closeGameModal() {
 
 async function openPlayableGame(title) {
   const cfg = GAMES_CONFIG.find(x => x.title === title) || GAMES_CONFIG[0];
-  try {
-    const st = await fetch("/api/game/start", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
-    }).then(x => x.json());
-    if (!st.ok) return notify(st.error || "Cannot start game");
+  const st = await apiPost("/api/game/start", { game_name: cfg.title, reward_pts: cfg.pts }, "Cannot start game");
+  if (!st.ok) return notify(st.error || "Cannot start game");
 
-    clearGameTimers();
-    GM.cfg = cfg;
-    GM.token = st.session_token;
-    GM.adUrl = st.ad_url || "";
-    GM.score = 0;
-    GM.timeLeft = cfg.timeSec || 16;
-    GM.finished = false;
-    GM.adOpenedAtMs = 0;
-    GM.leftAdWindow = false;
+  clearGameTimers();
+  GM.cfg = cfg;
+  GM.token = st.session_token;
+  GM.adUrl = st.ad_url || "";
+  GM.score = 0;
+  GM.timeLeft = cfg.timeSec || 16;
+  GM.finished = false;
+  GM.adOpenedAtMs = 0;
 
-    document.getElementById("gm-title").textContent = cfg.title;
-    document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
-    document.getElementById("gm-ad-link").href = GM.adUrl || "#";
-    document.getElementById("gm-play-stage").style.display = "block";
-    document.getElementById("gm-ad-stage").style.display = "none";
-    document.getElementById("game-modal").classList.add("open");
+  document.getElementById("gm-title").textContent = cfg.title;
+  document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
+  document.getElementById("gm-ad-link").href = GM.adUrl || "#";
+  document.getElementById("gm-play-stage").style.display = "block";
+  document.getElementById("gm-ad-stage").style.display = "none";
+  document.getElementById("game-modal").classList.add("open");
 
-    initGameMode();
-  } catch (_) {
-    notify("Cannot start game");
-  }
+  initGameMode();
 }
 
 function handleGameStageButton() {
@@ -3320,23 +3341,15 @@ function renderSnakeBoard(arena) {
 async function launchGameAdWindow() {
   if (!GM.token) return;
   GM.adOpenedAtMs = Date.now();
-  await fetch("/api/game/ad-open", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-  });
+  await apiPost("/api/game/ad-open", { session_token: GM.token }, "Ad open error");
   if (GM.adUrl) {
-    window.open(GM.adUrl, "_blank", "noopener,noreferrer");
+    try { window.open(GM.adUrl, "_blank", "noopener,noreferrer"); } catch (_) {}
   }
 }
 
 function relaunchGameAd() {
   GM.adOpenedAtMs = Date.now();
-  fetch("/api/game/ad-open", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-  });
+  apiPost("/api/game/ad-open", { session_token: GM.token }, "Ad open error");
 }
 
 async function triggerGameAdStage() {
@@ -3363,11 +3376,7 @@ async function triggerGameAdStage() {
     } else {
       if (!verifiedSent) {
         verifiedSent = true;
-        await fetch("/api/game/ad-complete", {
-          method: "POST",
-          headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-        });
+        await apiPost("/api/game/ad-complete", { session_token: GM.token }, "Ad verify error");
       }
       document.getElementById("gm-ad-timer").textContent = "8–10s Complete ✓ Ready to Claim!";
       claimBtn.disabled = false;
@@ -3383,11 +3392,7 @@ async function triggerGameAdStage() {
 }
 
 async function claimGameReward() {
-  const cl = await fetch("/api/game/claim", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-  }).then(x => x.json());
+  const cl = await apiPost("/api/game/claim", { session_token: GM.token }, "Claim error");
   if (cl.ok) {
     closeGameModal();
     notify(`+${cl.pts_earned} PTS রিওয়ার্ড সাকসেস!`);
@@ -3407,7 +3412,7 @@ function copyRef() {
 function shareTelegram() {
   const link = document.getElementById("ref-url").value;
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("TapMint এ জয়েন করে টাস্ক, মাইনিং ও গেম খেলে পয়েন্ট আয় করুন!")}`;
-  window.open(shareUrl, "_blank", "noopener,noreferrer");
+  try { window.open(shareUrl, "_blank", "noopener,noreferrer"); } catch (_) {}
 }
 
 function clientValidateWallet(method, acc, pin) {
@@ -3431,11 +3436,7 @@ async function saveW() {
   const pin = document.getElementById("w-pin-set").value.trim();
   const localErr = clientValidateWallet(PAY, acc, pin);
   if (localErr) return notify(localErr);
-  const r = await fetch("/api/wallet/connect", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, method: PAY, account_target: acc, pin })
-  }).then(x => x.json());
+  const r = await apiPost("/api/wallet/connect", { method: PAY, account_target: acc, pin }, "Wallet save error");
   if (r.ok) {
     document.getElementById("w-pin-set").value = "";
     document.getElementById("w-form").style.display = "none";
@@ -3452,14 +3453,7 @@ async function reqWithdraw() {
   if (!/^\d{4}$/.test(pin)) return notify("আগে ৪ সংখ্যার পিন দিন");
   if (PAY === "Binance USDT" && val < 15000) return notify("বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5) হলে উইথড্র পাবেন");
   if (PAY !== "Binance USDT" && val < 1500) return notify("সর্বনিম্ন ১,৫০০ PTS হলে উইথড্র নিতে পারবেন");
-  const r = await fetch("/api/withdraw/request", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA,
-      requested_pts: val, pin, method: PAY
-    })
-  }).then(x => x.json());
+  const r = await apiPost("/api/withdraw/request", { requested_pts: val, pin, method: PAY }, "Withdraw error");
   if (r.ok) {
     document.getElementById("w-pin-confirm").value = "";
     paintPin();
@@ -3480,9 +3474,11 @@ async function loadApp() {
       username: NAME,
       ref: REF
     });
-    const r = await fetch("/api/user/bootstrap?" + q.toString(), {
+    const res = await fetch(API_BASE + "/api/user/bootstrap?" + q.toString(), {
       headers: authHeaders()
-    }).then(x => x.json());
+    });
+    const text = await res.text();
+    const r = JSON.parse(text);
     if (r && r.ok) {
       ST = r;
     } else if (r && r.error) {
