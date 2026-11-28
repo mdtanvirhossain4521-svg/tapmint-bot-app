@@ -138,10 +138,6 @@ def categorize_source(source_type: str) -> str:
 
 
 def verify_telegram_init_data(init_data: str) -> tuple[bool, dict | None]:
-    """
-    Validates Telegram Mini App initData using HMAC-SHA256 when TELEGRAM_BOT_TOKEN is set.
-    Also parses user object if present.
-    """
     if not init_data:
         return False, None
     try:
@@ -182,9 +178,6 @@ def verify_telegram_init_data(init_data: str) -> tuple[bool, dict | None]:
 
 
 def resolve_identity(req, data: dict | None = None) -> dict:
-    """
-    Resolves authenticated identity from Telegram initData / tg_id / user_id.
-    """
     payload = data or {}
     init_data = (
         req.headers.get("X-Telegram-Init-Data")
@@ -234,7 +227,7 @@ def resolve_identity(req, data: dict | None = None) -> dict:
             "telegram_id": tg_id,
             "telegram_username": tg_handle,
             "username": full_name[:64],
-            "is_telegram_verified": True if is_tg_sig_valid else True,
+            "is_telegram_verified": True,
             "auth_mode": "telegram_verified" if is_tg_sig_valid else "telegram_webapp",
         }
 
@@ -272,10 +265,6 @@ def resolve_identity(req, data: dict | None = None) -> dict:
 
 
 def validate_wallet_credentials(method: str, target: str, pin: str) -> tuple[bool, str, str]:
-    """
-    Strictly validates payment method, account number/address, and 4-digit PIN.
-    Returns (is_valid, error_message, normalized_target).
-    """
     m = (method or "").strip()
     t = (target or "").strip()
     p = (pin or "").strip()
@@ -294,11 +283,7 @@ def validate_wallet_credentials(method: str, target: str, pin: str) -> tuple[boo
         if digits_only.startswith("880") and len(digits_only) == 13:
             digits_only = "0" + digits_only[3:]
         if not BD_MOBILE_RE.match(digits_only):
-            return (
-                False,
-                f"ভ্যালিড {m} নম্বর দিন (১১ ডিজিট, শুরু ০১৩ থেকে ০১৯ এর মধ্যে হতে হবে)।",
-                "",
-            )
+            return False, f"ভ্যালিড {m} নম্বর দিন (১১ ডিজিট, শুরু ০১৩ থেকে ০১৯ এর মধ্যে হতে হবে)।", ""
         return True, "", digits_only
 
     if BEP20_RE.match(t):
@@ -308,11 +293,7 @@ def validate_wallet_credentials(method: str, target: str, pin: str) -> tuple[boo
     if BINANCE_PAY_ID_RE.match(t):
         return True, "", t
 
-    return (
-        False,
-        "ভ্যালিড Binance USDT অ্যাড্রেস (TRC20 'T...' / BEP20 '0x...') অথবা ৬–১২ ডিজিটের Binance Pay ID দিন।",
-        "",
-    )
+    return False, "ভ্যালিড Binance USDT অ্যাড্রেস (TRC20 'T...' / BEP20 '0x...') অথবা ৬–১২ ডিজিটের Binance Pay ID দিন।", ""
 
 
 def init_db() -> None:
@@ -1260,17 +1241,11 @@ def api_withdraw_request():
         if method == "Binance USDT":
             min_req = BINANCE_MIN_WITHDRAW_PTS
             if req_pts < min_req:
-                return jsonify({
-                    "ok": False,
-                    "error": f"Binance উইথড্রতে সর্বনিম্ন {min_req:,} PTS (৫ ডলার) প্রয়োজন"
-                }), 400
+                return jsonify({"ok": False, "error": f"Binance উইথড্রতে সর্বনিম্ন {min_req:,} PTS (৫ ডলার) প্রয়োজন"}), 400
         else:
             min_req = GENERAL_MIN_WITHDRAW_PTS
             if req_pts < min_req:
-                return jsonify({
-                    "ok": False,
-                    "error": f"সর্বনিম্ন {min_req:,} PTS প্রয়োজন"
-                }), 400
+                return jsonify({"ok": False, "error": f"সর্বনিম্ন {min_req:,} PTS প্রয়োজন"}), 400
 
         if req_pts > int(u["pts_balance"]):
             return jsonify({"ok": False, "error": "Insufficient PTS balance"}), 400
@@ -2205,7 +2180,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   <div class="tg-top">
     <div onclick="openAccountModal()" style="cursor:pointer;">
       <div class="tg-brand">TapMint <span class="tg-badge">✓</span></div>
-      <div class="tg-sub" id="acct-sub">Loading Telegram Profile...</div>
+      <div class="tg-sub" id="acct-sub">TapMintUser • Account: user_1001</div>
     </div>
     <div style="text-align:right;cursor:pointer;" onclick="openAccountModal()">
       <div class="acct-pill" id="acct-badge">Telegram Auth</div>
@@ -2217,7 +2192,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div class="card-3d" style="padding:11px 14px;cursor:pointer;" onclick="openAccountModal()">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div>
-          <div style="font-size:13px;font-weight:800;color:#ffffff;" id="prof-name">TapMint Account</div>
+          <div style="font-size:13px;font-weight:800;color:#ffffff;" id="prof-name">TapMintUser</div>
           <div class="muted" style="font-size:11px;margin-top:2px;" id="prof-meta">Telegram Username: — • Telegram ID: —</div>
         </div>
         <div class="acct-pill" id="prof-ver-pill">✓ Verified</div>
@@ -2518,7 +2493,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
 <script>
 const qp = new URLSearchParams(window.location.search);
-const tgWebApp = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+const tgWebApp = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
 if (tgWebApp) {
   try { tgWebApp.ready(); tgWebApp.expand(); } catch (_) {}
 }
@@ -2526,51 +2501,94 @@ if (tgWebApp) {
 const TG_INIT_DATA = (tgWebApp && tgWebApp.initData) ? tgWebApp.initData : (qp.get("init_data") || "");
 const TG_USER_OBJ = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.user) ? tgWebApp.initDataUnsafe.user : null;
 
-const TG_ID = TG_USER_OBJ && TG_USER_OBJ.id
+const TG_ID = (TG_USER_OBJ && TG_USER_OBJ.id)
   ? String(TG_USER_OBJ.id)
   : (qp.get("tg_id") || "");
 
-const TG_USERNAME = TG_USER_OBJ && TG_USER_OBJ.username
+const TG_USERNAME = (TG_USER_OBJ && TG_USER_OBJ.username)
   ? String(TG_USER_OBJ.username).replace(/^@/, "")
   : (qp.get("tg_username") || "").replace(/^@/, "");
 
 const USER = TG_ID
-  ? `tg_${TG_ID}`
+  ? ("tg_" + TG_ID)
   : (qp.get("user_id") || "user_1001");
 
-const NAME = TG_USER_OBJ && TG_USER_OBJ.id
-  ? (`${TG_USER_OBJ.first_name || ""} ${TG_USER_OBJ.last_name || ""}`.trim() || (TG_USERNAME ? `@${TG_USERNAME}` : `TG_${TG_ID}`))
-  : (qp.get("username") || (TG_USERNAME ? `@${TG_USERNAME}` : (TG_ID ? `TG_${TG_ID}` : "TapMintUser")));
+const NAME = (TG_USER_OBJ && TG_USER_OBJ.id)
+  ? (((TG_USER_OBJ.first_name || "") + " " + (TG_USER_OBJ.last_name || "")).trim() || (TG_USERNAME ? ("@" + TG_USERNAME) : ("TG_" + TG_ID)))
+  : (qp.get("username") || (TG_USERNAME ? ("@" + TG_USERNAME) : (TG_ID ? ("TG_" + TG_ID) : "TapMintUser")));
 
 const REF = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.start_param)
   ? String(tgWebApp.initDataUnsafe.start_param)
   : (qp.get("ref") || "");
 
-function authHeaders(extra = {}) {
+function authHeaders(extra) {
   const h = Object.assign({
     "X-User-Id": USER,
     "X-Username": NAME,
-  }, extra);
+  }, extra || {});
   if (TG_ID) h["X-Telegram-Id"] = TG_ID;
   if (TG_USERNAME) h["X-Telegram-Username"] = TG_USERNAME;
   if (TG_INIT_DATA) h["X-Telegram-Init-Data"] = TG_INIT_DATA;
   return h;
 }
 
-function openAccountModal() {
-  const u = (ST && ST.user) ? ST.user : {
+const DEFAULT_SESSIONS = [1, 2, 3, 4, 5].map(n => ({
+  session_num: n,
+  completed_count: 0,
+  is_locked: false,
+  is_unlocked: n === 1,
+  locked_until: "",
+  completed_tasks: []
+}));
+
+let ST = {
+  ok: true,
+  user: {
     user_id: USER,
     telegram_id: TG_ID,
     telegram_username: TG_USERNAME,
     is_telegram_verified: Boolean(TG_ID),
-    username: NAME
-  };
+    username: NAME,
+    pts_balance: 0,
+    total_earned_pts: 0
+  },
+  wallet: { connected: false, verified: false, method: "bKash", masked_target: "Not Set" },
+  spin: { max_daily: 1, spins_used_today: 0, spin_streak_days: 0, next_spin_at: "" },
+  mining: { max_daily: 6, claims_today: 0, next_claim_at: "" },
+  unlocked_session: 1,
+  task_sessions: DEFAULT_SESSIONS,
+  referral: { total_referrals: 0, active_referrals: 0, current_bonus_pts: 0 },
+  withdraw_rules: {
+    general_min_pts: 1500,
+    binance_min_pts: 15000,
+    binance_pts_per_usd: 3000,
+    binance_min_usdt_rule: 5,
+    fee_rate: 0.05,
+    binance_network_fee_pts: 50
+  }
+};
+
+let SESS = 1;
+let PAY = "bKash";
+let DEG = 0;
+
+function notify(t) {
+  const el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = t;
+  el.style.display = "block";
+  clearTimeout(window._nt);
+  window._nt = setTimeout(() => { el.style.display = "none"; }, 3000);
+}
+
+function openAccountModal() {
+  const u = (ST && ST.user) ? ST.user : {};
   const badgeEl = document.getElementById("am-badge");
   const isVer = Boolean(u.is_telegram_verified && u.telegram_id);
-  badgeEl.textContent = isVer ? "✓ Verified Telegram Account" : "Unverified Account";
+  badgeEl.textContent = isVer ? "✓ Verified Telegram Account" : "Active Account";
   badgeEl.classList.toggle("unverified", !isVer);
   document.getElementById("am-name").textContent = u.username || NAME;
-  document.getElementById("am-username").textContent = u.telegram_username ? `@${u.telegram_username}` : "Not set";
+  document.getElementById("am-username").textContent = u.telegram_username ? ("@" + u.telegram_username) : "Not set";
   document.getElementById("am-tgid").textContent = u.telegram_id || "Unavailable";
   document.getElementById("am-uid").textContent = u.user_id || USER;
   document.getElementById("account-modal").classList.add("open");
@@ -2624,27 +2642,14 @@ function renderWheelSvg() {
   g.innerHTML = html;
 }
 
-renderWheelSvg();
-
-let ST = null;
-let SESS = 1;
-let PAY = "bKash";
-let DEG = 0;
-
-function notify(t) {
-  const el = document.getElementById("toast");
-  el.textContent = t;
-  el.style.display = "block";
-  clearTimeout(window._nt);
-  window._nt = setTimeout(() => { el.style.display = "none"; }, 3000);
-}
-
 function goPage(p) {
   document.querySelectorAll(".page").forEach(x => x.classList.remove("active"));
   document.querySelectorAll(".bnav-item").forEach(x => x.classList.remove("active"));
-  document.getElementById("page-" + p).classList.add("active");
-  document.getElementById("bi-" + p).classList.add("active");
-  if (p === "games") drawGames();
+  const pageEl = document.getElementById("page-" + p);
+  const btnEl = document.getElementById("bi-" + p);
+  if (pageEl) pageEl.classList.add("active");
+  if (btnEl) btnEl.classList.add("active");
+  draw();
 }
 
 function toggleWForm() {
@@ -2666,7 +2671,8 @@ function paintPin() {
 function setPay(m) {
   PAY = m;
   ["bKash", "Nagad", "Binance USDT"].forEach(k => {
-    document.getElementById("pm-" + k).classList.toggle("active", k === m);
+    const pe = document.getElementById("pm-" + k);
+    if (pe) pe.classList.toggle("active", k === m);
     const wm = document.getElementById("wm-" + k);
     if (wm) wm.classList.toggle("active", k === m);
   });
@@ -2685,9 +2691,11 @@ function setPay(m) {
 }
 
 function syncWCopy() {
-  if (!ST) return;
-  const wr = ST.withdraw_rules;
+  const wr = (ST && ST.withdraw_rules) ? ST.withdraw_rules : {
+    general_min_pts: 1500, binance_min_pts: 15000, binance_min_usdt_rule: 5
+  };
   const ptsInput = document.getElementById("w-pts-val");
+  if (!ptsInput) return;
   document.getElementById("w-sub").textContent =
     `সর্বনিম্ন ${wr.general_min_pts.toLocaleString()} PTS হলে উইথড্র নিতে পারবেন • বাইনান্সে ১৫,০০০ PTS ($5)`;
   if (PAY === "Binance USDT") {
@@ -2727,10 +2735,11 @@ function drawDayTracker(streakDays) {
 }
 
 function drawSpinClock() {
-  if (!ST) return;
-  const used = ST.spin.spins_used_today;
+  if (!ST || !ST.spin) return;
+  const used = ST.spin.spins_used_today || 0;
+  const maxD = ST.spin.max_daily || 1;
   const hasFuture = ST.spin.next_spin_at && new Date() < new Date(ST.spin.next_spin_at);
-  document.getElementById("spin-btn").disabled = used >= ST.spin.max_daily || hasFuture;
+  document.getElementById("spin-btn").disabled = used >= maxD || hasFuture;
   if (hasFuture) {
     document.getElementById("spin-countdown").textContent = `Next spin countdown: ${fmtTime(ST.spin.next_spin_at)}`;
     document.getElementById("spin-status").textContent = "0 Spin Available Today";
@@ -2741,9 +2750,9 @@ function drawSpinClock() {
 }
 
 function drawMiningUi() {
-  if (!ST) return;
-  const clm = ST.mining.claims_today;
-  const maxC = ST.mining.max_daily;
+  if (!ST || !ST.mining) return;
+  const clm = ST.mining.claims_today || 0;
+  const maxC = ST.mining.max_daily || 6;
   const totalSec = 7200;
   const activeM = ST.mining.next_claim_at && new Date() < new Date(ST.mining.next_claim_at);
   const remSec = activeM ? Math.max(0, Math.floor((new Date(ST.mining.next_claim_at) - new Date()) / 1000)) : 0;
@@ -2775,68 +2784,78 @@ function drawMiningUi() {
 }
 
 function draw() {
-  if (!ST) return;
-  const u = ST.user;
-  const b = u.pts_balance;
-  document.getElementById("hdr-pts").textContent = b.toLocaleString() + " PTS";
-  document.getElementById("home-bal").textContent = b.toLocaleString() + " PTS";
-  document.getElementById("w-bal").textContent = b.toLocaleString() + " PTS";
+  try {
+    const u = (ST && ST.user) ? ST.user : {
+      user_id: USER, telegram_id: TG_ID, telegram_username: TG_USERNAME,
+      is_telegram_verified: Boolean(TG_ID), username: NAME, pts_balance: 0
+    };
+    const b = parseInt(u.pts_balance || 0, 10);
+    document.getElementById("hdr-pts").textContent = b.toLocaleString() + " PTS";
+    document.getElementById("home-bal").textContent = b.toLocaleString() + " PTS";
+    document.getElementById("w-bal").textContent = b.toLocaleString() + " PTS";
 
-  const isVer = Boolean(u.is_telegram_verified && u.telegram_id);
-  const handleText = u.telegram_username ? `@${u.telegram_username}` : u.username;
-  const tgIdText = u.telegram_id ? `ID: ${u.telegram_id}` : `Account: ${u.user_id}`;
+    const isVer = Boolean(u.is_telegram_verified && u.telegram_id);
+    const handleText = u.telegram_username ? ("@" + u.telegram_username) : (u.username || NAME);
+    const tgIdText = u.telegram_id ? ("ID: " + u.telegram_id) : ("Account: " + (u.user_id || USER));
 
-  document.getElementById("acct-sub").textContent = `${handleText} • ${tgIdText}`;
-  const topBadge = document.getElementById("acct-badge");
-  topBadge.textContent = isVer ? "✓ TG Verified" : "Unverified";
-  topBadge.classList.toggle("unverified", !isVer);
+    document.getElementById("acct-sub").textContent = `${handleText} • ${tgIdText}`;
+    const topBadge = document.getElementById("acct-badge");
+    topBadge.textContent = isVer ? "✓ TG Verified" : "Active Account";
+    topBadge.classList.toggle("unverified", false);
 
-  document.getElementById("prof-name").textContent = `${u.username}${u.telegram_username ? ` (@${u.telegram_username})` : ""}`;
-  document.getElementById("prof-meta").textContent = `Telegram ID: ${u.telegram_id || "—"} • Username: ${u.telegram_username ? `@${u.telegram_username}` : "—"}`;
-  const profPill = document.getElementById("prof-ver-pill");
-  profPill.textContent = isVer ? "✓ Verified" : "Unverified";
-  profPill.classList.toggle("unverified", !isVer);
+    document.getElementById("prof-name").textContent = `${u.username || NAME}${u.telegram_username ? ` (@${u.telegram_username})` : ""}`;
+    document.getElementById("prof-meta").textContent = `Telegram ID: ${u.telegram_id || "—"} • Username: ${u.telegram_username ? ("@" + u.telegram_username) : "—"}`;
+    const profPill = document.getElementById("prof-ver-pill");
+    profPill.textContent = isVer ? "✓ Verified" : "✓ Active";
+    profPill.classList.toggle("unverified", false);
 
-  drawDayTracker(ST.spin.spin_streak_days);
-  drawSpinClock();
-  drawMiningUi();
+    drawDayTracker(ST.spin ? ST.spin.spin_streak_days : 0);
+    drawSpinClock();
+    drawMiningUi();
 
-  const doneS = ST.task_sessions.filter(x => x.completed_count >= 20 || x.is_locked).length;
-  document.getElementById("home-t-txt").textContent = `${doneS}/5 Completed`;
+    const sessions = (ST && ST.task_sessions && ST.task_sessions.length) ? ST.task_sessions : DEFAULT_SESSIONS;
+    const doneS = sessions.filter(x => x.completed_count >= 20 || x.is_locked).length;
+    document.getElementById("home-t-txt").textContent = `${doneS}/5 Completed`;
 
-  if (ST.unlocked_session) {
-    const curSelected = ST.task_sessions.find(x => x.session_num === SESS);
+    const unlocked = ST.unlocked_session || 1;
+    const curSelected = sessions.find(x => x.session_num === SESS);
     if (!curSelected || curSelected.is_locked) {
-      SESS = ST.unlocked_session;
+      SESS = unlocked;
     }
+
+    drawSessions();
+    drawTasks();
+    drawGames();
+
+    const actCount = parseInt((ST.referral && ST.referral.active_referrals) || 0, 10);
+    const boostPct = Math.min(30, actCount * 5);
+    document.getElementById("ref-cnt").textContent = (ST.referral && ST.referral.total_referrals) || 0;
+    document.getElementById("ref-act").textContent = actCount;
+    document.getElementById("ref-pts").textContent = `+${boostPct}% Boost`;
+    const refParam = u.telegram_id ? ("tg_" + u.telegram_id) : (u.user_id || USER);
+    document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(refParam)}`;
+
+    if (ST.wallet && ST.wallet.connected) {
+      document.getElementById("w-conn").textContent =
+        `Verified Wallet: ${ST.wallet.method} (${ST.wallet.masked_target})`;
+      document.getElementById("w-ver").textContent = "● Valid Method, Account & 4-Digit PIN Verified";
+      setPay(ST.wallet.method);
+    }
+    syncWCopy();
+  } catch (err) {
+    console.error("Draw error:", err);
   }
-
-  drawSessions();
-  drawTasks();
-  drawGames();
-
-  const actCount = parseInt(ST.referral.active_referrals || 0, 10);
-  const boostPct = Math.min(30, actCount * 5);
-  document.getElementById("ref-cnt").textContent = ST.referral.total_referrals;
-  document.getElementById("ref-act").textContent = actCount;
-  document.getElementById("ref-pts").textContent = `+${boostPct}% Boost`;
-  const refParam = u.telegram_id ? `tg_${u.telegram_id}` : u.user_id;
-  document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(refParam)}`;
-
-  if (ST.wallet.connected) {
-    document.getElementById("w-conn").textContent =
-      `Verified Wallet: ${ST.wallet.method} (${ST.wallet.masked_target})`;
-    document.getElementById("w-ver").textContent = "● Valid Method, Account & 4-Digit PIN Verified";
-    setPay(ST.wallet.method);
-  }
-  syncWCopy();
 }
 
 function drawSessions() {
   const wrap = document.getElementById("sess-5");
+  if (!wrap) return;
   wrap.innerHTML = "";
-  for (const s of ST.task_sessions) {
-    const isOpenSession = !s.is_locked && s.session_num === ST.unlocked_session;
+  const sessions = (ST && ST.task_sessions && ST.task_sessions.length) ? ST.task_sessions : DEFAULT_SESSIONS;
+  const unlocked = (ST && ST.unlocked_session) || 1;
+
+  for (const s of sessions) {
+    const isOpenSession = !s.is_locked && s.session_num === unlocked;
     const el = document.createElement("div");
     el.className = "sess-pill" + (s.session_num === SESS ? " active" : "") + (s.is_locked || !isOpenSession ? " locked" : "");
     let stHtml = "";
@@ -2862,22 +2881,26 @@ function drawSessions() {
 }
 
 function drawTasks() {
-  const cur = ST.task_sessions.find(x => x.session_num === SESS);
+  const sessions = (ST && ST.task_sessions && ST.task_sessions.length) ? ST.task_sessions : DEFAULT_SESSIONS;
+  const unlocked = (ST && ST.unlocked_session) || 1;
+  const cur = sessions.find(x => x.session_num === SESS) || sessions[0];
   const done = cur ? cur.completed_count : 0;
   const doneSet = new Set((cur && cur.completed_tasks) ? cur.completed_tasks : []);
   document.getElementById("sess-title").textContent = `Session ${SESS}: 20 Tasks (${done}/20 Completed)`;
 
   const list = document.getElementById("task-rows");
+  if (!list) return;
   list.innerHTML = "";
+
   if (cur && cur.is_locked) {
     list.innerHTML = `<div class="card-3d" style="text-align:center;color:#fbbf24;font-size:13px;">
       Session ${SESS} Locked (${fmtTime(cur.locked_until)} বাকি)
     </div>`;
     return;
   }
-  if (cur && cur.session_num !== ST.unlocked_session) {
+  if (cur && cur.session_num !== unlocked) {
     list.innerHTML = `<div class="card-3d" style="text-align:center;color:#94a3b8;font-size:13px;">
-      আগে Session ${ST.unlocked_session} সম্পন্ন করুন, এরপর Session ${SESS} খুলবে।
+      আগে Session ${unlocked} সম্পন্ন করুন, এরপর Session ${SESS} খুলবে।
     </div>`;
     return;
   }
@@ -2910,84 +2933,96 @@ function drawTasks() {
 
 async function startTask(sNum, tNum) {
   const btn = document.getElementById(`ot-${sNum}-${tNum}`);
-  btn.disabled = true;
-  const op = await fetch("/api/task/open", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
-  }).then(r => r.json());
-  if (!op.ok) {
-    notify(op.error || "Cannot open task");
-    btn.disabled = false;
-    return;
-  }
-  if (op.launch_url) {
-    window.open(op.launch_url, "_blank", "noopener,noreferrer");
-  }
-  let left = 9;
-  btn.textContent = `${left}s`;
-  const iv = setInterval(async () => {
-    left -= 1;
-    if (left > 0) {
-      btn.textContent = `${left}s`;
-    } else {
-      clearInterval(iv);
-      btn.textContent = "Claiming...";
-      const cp = await fetch("/api/task/complete", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
-      }).then(r => r.json());
-      if (cp.ok) {
-        notify(`+${cp.pts_earned} PTS earned!`);
-        await loadApp();
-      } else {
-        notify(cp.error || "Task failed");
-        btn.disabled = false;
-        btn.textContent = "Open Task";
-      }
+  if (btn) btn.disabled = true;
+  try {
+    const op = await fetch("/api/task/open", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
+    }).then(r => r.json());
+    if (!op.ok) {
+      notify(op.error || "Cannot open task");
+      if (btn) btn.disabled = false;
+      return;
     }
-  }, 1000);
+    if (op.launch_url) {
+      window.open(op.launch_url, "_blank", "noopener,noreferrer");
+    }
+    let left = 9;
+    if (btn) btn.textContent = `${left}s`;
+    const iv = setInterval(async () => {
+      left -= 1;
+      if (left > 0) {
+        if (btn) btn.textContent = `${left}s`;
+      } else {
+        clearInterval(iv);
+        if (btn) btn.textContent = "Claiming...";
+        const cp = await fetch("/api/task/complete", {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
+        }).then(r => r.json());
+        if (cp.ok) {
+          notify(`+${cp.pts_earned} PTS earned!`);
+          await loadApp();
+        } else {
+          notify(cp.error || "Task failed");
+          if (btn) { btn.disabled = false; btn.textContent = "Open Task"; }
+        }
+      }
+    }, 1000);
+  } catch (_) {
+    if (btn) { btn.disabled = false; btn.textContent = "Open Task"; }
+    notify("Network error");
+  }
 }
 
 async function doSpin() {
-  const r = await fetch("/api/spin", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
-  }).then(x => x.json());
-  if (!r.ok) return notify(r.error || "Spin not ready");
+  try {
+    const r = await fetch("/api/spin", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
+    }).then(x => x.json());
+    if (!r.ok) return notify(r.error || "Spin not ready");
 
-  const sliceDeg = 360 / WHEEL_SLOTS.length;
-  const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
-  const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
-  const baseMod = ((DEG % 360) + 360) % 360;
-  const desiredMod = (360 - targetCenter) % 360;
-  const deltaMod = (desiredMod - baseMod + 360) % 360;
-  DEG += 1080 + deltaMod;
+    const sliceDeg = 360 / WHEEL_SLOTS.length;
+    const sIdx = typeof r.slot_index === "number" ? r.slot_index : 0;
+    const targetCenter = sIdx * sliceDeg + sliceDeg / 2;
+    const baseMod = ((DEG % 360) + 360) % 360;
+    const desiredMod = (360 - targetCenter) % 360;
+    const deltaMod = (desiredMod - baseMod + 360) % 360;
+    DEG += 1080 + deltaMod;
 
-  document.getElementById("wheel-rotor").style.transform = `rotate(${DEG}deg)`;
-  document.getElementById("spin-msg").textContent = r.pts_earned > 0
-    ? `${r.slot} (+${r.pts_earned} PTS)`
-    : "Try Again (+0 PTS)";
+    document.getElementById("wheel-rotor").style.transform = `rotate(${DEG}deg)`;
+    document.getElementById("spin-msg").textContent = r.pts_earned > 0
+      ? `${r.slot} (+${r.pts_earned} PTS)`
+      : "Try Again (+0 PTS)";
 
-  setTimeout(async () => {
-    notify(r.pts_earned > 0 ? `+${r.pts_earned} PTS added!` : "Try Again today!");
-    await loadApp();
-  }, 2500);
+    setTimeout(async () => {
+      notify(r.pts_earned > 0 ? `+${r.pts_earned} PTS added!` : "Try Again today!");
+      await loadApp();
+    }, 2500);
+  } catch (_) {
+    notify("Spin error");
+  }
 }
 
 async function doMining() {
-  const r = await fetch("/api/mining/claim", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
-  }).then(x => x.json());
-  if (r.ok) {
-    notify(`+${r.pts_earned} PTS mined!`);
-    await loadApp();
-  } else {
-    notify(r.error || "Mining not ready");
+  try {
+    const r = await fetch("/api/mining/claim", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
+    }).then(x => x.json());
+    if (r.ok) {
+      notify(`+${r.pts_earned} PTS mined!`);
+      await loadApp();
+    } else {
+      notify(r.error || "Mining not ready");
+    }
+  } catch (_) {
+    notify("Mining error");
   }
 }
 
@@ -3000,6 +3035,7 @@ const GAMES_CONFIG = [
 
 function drawGames() {
   const box = document.getElementById("game-rows");
+  if (!box) return;
   box.innerHTML = "";
   for (const g of GAMES_CONFIG) {
     const el = document.createElement("div");
@@ -3021,32 +3057,19 @@ function drawGames() {
 }
 
 let GM = {
-  cfg: null,
-  token: "",
-  adUrl: "",
-  score: 0,
-  timeLeft: 16,
-  timerIv: null,
-  spawnIv: null,
-  adTimerIv: null,
-  adOpenedAtMs: 0,
-  leftAdWindow: false,
-  finished: false,
-  catcherX: 135,
-  mergePair: [16, 16],
-  snake: [{ x: 5, y: 4 }],
-  snakeDir: { x: 1, y: 0 },
-  food: { x: 11, y: 4 },
-  hazard: { x: 8, y: 2 },
+  cfg: null, token: "", adUrl: "", score: 0, timeLeft: 16,
+  timerIv: null, spawnIv: null, adTimerIv: null,
+  adOpenedAtMs: 0, leftAdWindow: false, finished: false,
+  catcherX: 135, mergePair: [16, 16],
+  snake: [{ x: 5, y: 4 }], snakeDir: { x: 1, y: 0 },
+  food: { x: 11, y: 4 }, hazard: { x: 8, y: 2 },
 };
 
 function clearGameTimers() {
   if (GM.timerIv) clearInterval(GM.timerIv);
   if (GM.spawnIv) clearInterval(GM.spawnIv);
   if (GM.adTimerIv) clearInterval(GM.adTimerIv);
-  GM.timerIv = null;
-  GM.spawnIv = null;
-  GM.adTimerIv = null;
+  GM.timerIv = null; GM.spawnIv = null; GM.adTimerIv = null;
 }
 
 function closeGameModal() {
@@ -3056,31 +3079,35 @@ function closeGameModal() {
 
 async function openPlayableGame(title) {
   const cfg = GAMES_CONFIG.find(x => x.title === title) || GAMES_CONFIG[0];
-  const st = await fetch("/api/game/start", {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
-  }).then(x => x.json());
-  if (!st.ok) return notify(st.error || "Cannot start game");
+  try {
+    const st = await fetch("/api/game/start", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
+    }).then(x => x.json());
+    if (!st.ok) return notify(st.error || "Cannot start game");
 
-  clearGameTimers();
-  GM.cfg = cfg;
-  GM.token = st.session_token;
-  GM.adUrl = st.ad_url || "";
-  GM.score = 0;
-  GM.timeLeft = cfg.timeSec || 16;
-  GM.finished = false;
-  GM.adOpenedAtMs = 0;
-  GM.leftAdWindow = false;
+    clearGameTimers();
+    GM.cfg = cfg;
+    GM.token = st.session_token;
+    GM.adUrl = st.ad_url || "";
+    GM.score = 0;
+    GM.timeLeft = cfg.timeSec || 16;
+    GM.finished = false;
+    GM.adOpenedAtMs = 0;
+    GM.leftAdWindow = false;
 
-  document.getElementById("gm-title").textContent = cfg.title;
-  document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
-  document.getElementById("gm-ad-link").href = GM.adUrl || "#";
-  document.getElementById("gm-play-stage").style.display = "block";
-  document.getElementById("gm-ad-stage").style.display = "none";
-  document.getElementById("game-modal").classList.add("open");
+    document.getElementById("gm-title").textContent = cfg.title;
+    document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
+    document.getElementById("gm-ad-link").href = GM.adUrl || "#";
+    document.getElementById("gm-play-stage").style.display = "block";
+    document.getElementById("gm-ad-stage").style.display = "none";
+    document.getElementById("game-modal").classList.add("open");
 
-  initGameMode();
+    initGameMode();
+  } catch (_) {
+    notify("Cannot start game");
+  }
 }
 
 function handleGameStageButton() {
@@ -3109,9 +3136,6 @@ function initGameMode() {
         <button id="tap-moving-bad" style="position:absolute;top:135px;left:185px;width:62px;height:62px;border-radius:50%;border:2px solid #fca5a5;border-bottom:4px solid #991b1b;background:radial-gradient(circle at 30% 25%,#f87171,#dc2626);color:#fff;font-weight:900;font-size:12px;cursor:pointer;transition:top 0.16s,left 0.16s;">
           -10
         </button>
-        <div style="position:absolute;bottom:8px;left:0;right:0;text-align:center;font-size:11px;color:#94a3b8;">
-          সবুজ টার্গেট ধরুন (+8), লাল বোম/ট্র্যাপ এড়িয়ে চলুন (-10)
-        </div>
       </div>
     `;
     const gBtn = document.getElementById("tap-moving-good");
@@ -3141,9 +3165,7 @@ function initGameMode() {
     GM.spawnIv = setInterval(moveTargets, 620);
   } else if (GM.cfg.mode === "catch") {
     GM.catcherX = 135;
-    arena.innerHTML = `
-      <div id="catcher-p" style="position:absolute;bottom:10px;left:${GM.catcherX}px;width:50px;height:24px;border-radius:10px;background:linear-gradient(180deg,#6ee7b7,#10b981);border:1px solid #a7f3d0;display:flex;align-items:center;justify-content:center;font-weight:900;color:#052e16;font-size:13px;">🧺</div>
-    `;
+    arena.innerHTML = `<div id="catcher-p" style="position:absolute;bottom:10px;left:${GM.catcherX}px;width:50px;height:24px;border-radius:10px;background:linear-gradient(180deg,#6ee7b7,#10b981);border:1px solid #a7f3d0;display:flex;align-items:center;justify-content:center;font-weight:900;color:#052e16;font-size:13px;">🧺</div>`;
     ctrl.innerHTML = `
       <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(-42)">⬅ Left</button>
       <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(42)">Right ➡</button>
@@ -3167,11 +3189,8 @@ function initGameMode() {
         if (dy >= 182 && dy <= 220 && Math.abs(dx - GM.catcherX) < 32) {
           clearInterval(fallIv);
           drop.remove();
-          if (isBomb) {
-            GM.score = Math.max(0, GM.score - 8);
-          } else {
-            GM.score += (isGem ? 12 : 7);
-          }
+          GM.score += isBomb ? -8 : (isGem ? 12 : 7);
+          if (GM.score < 0) GM.score = 0;
           updateGmHud();
           if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
         } else if (dy > 232) {
@@ -3256,7 +3275,6 @@ function renderMergeBoard(arena) {
     <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">
       <div style="font-size:13px;font-weight:800;color:#fbbf24;">মার্জ করুন: [ ${targetNum} ] + [ ${targetNum} ] = ${targetNum * 2} (+${targetNum} স্কোর)</div>
       <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:0 10px;">${btns}</div>
-      <div class="muted" style="font-size:11px;">ভুল নম্বর চাপলে -8 পয়েন্ট কাটা যাবে</div>
     </div>
   `;
 }
@@ -3274,7 +3292,6 @@ function handleMergePick(picked, expected) {
   } else {
     GM.score = Math.max(0, GM.score - 8);
     updateGmHud();
-    notify("ভুল টাইল! -8 স্কোর");
   }
   renderMergeBoard(document.getElementById("gm-arena"));
 }
@@ -3321,37 +3338,6 @@ function relaunchGameAd() {
     body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
   });
 }
-
-document.addEventListener("visibilitychange", async () => {
-  if (!GM.finished || !GM.token) return;
-  if (document.hidden) {
-    GM.leftAdWindow = true;
-    if (!GM.adOpenedAtMs) {
-      GM.adOpenedAtMs = Date.now();
-      await fetch("/api/game/ad-open", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-      });
-    }
-  } else if (GM.leftAdWindow) {
-    const spentSec = GM.adOpenedAtMs ? (Date.now() - GM.adOpenedAtMs) / 1000 : 0;
-    if (spentSec >= 8) {
-      const cp = await fetch("/api/game/ad-complete", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
-      }).then(x => x.json());
-      if (cp.ok) {
-        document.getElementById("gm-ad-timer").textContent = "৮–১০s সম্পন্ন ✓ ব্যাক এসেছেন, ক্লেম করুন!";
-        document.getElementById("gm-claim-btn").disabled = false;
-      }
-    } else {
-      const need = Math.max(1, Math.ceil(8 - spentSec));
-      notify(`অ্যাডে আরও ${need} সেকেন্ড থাকুন, তারপর ব্যাক আসলে রিওয়ার্ড পাবেন`);
-    }
-  }
-});
 
 async function triggerGameAdStage() {
   if (GM.finished) return;
@@ -3426,24 +3412,16 @@ function shareTelegram() {
 
 function clientValidateWallet(method, acc, pin) {
   const weak = ["0000","1111","2222","3333","4444","5555","6666","7777","8888","9999","1234","4321","1122","2211","1212","2020","2024","2025","2026"];
-  if (!/^\d{4}$/.test(pin)) {
-    return "পিন অবশ্যই ৪ সংখ্যার হতে হবে।";
-  }
-  if (weak.includes(pin) || new Set(pin.split("")).size === 1) {
-    return "দুর্বল বা সাধারণ পিন (যেমন 0000, 1111, 1234) গ্রহণযোগ্য নয়।";
-  }
+  if (!/^\d{4}$/.test(pin)) return "পিন অবশ্যই ৪ সংখ্যার হতে হবে।";
+  if (weak.includes(pin) || new Set(pin.split("")).size === 1) return "দুর্বল বা সাধারণ পিন গ্রহণযোগ্য নয়।";
   if (method === "bKash" || method === "Nagad") {
     const clean = acc.replace(/[\s\-+]/g, "").replace(/^880/, "0");
-    if (!/^01[3-9]\d{8}$/.test(clean)) {
-      return `ভ্যালিড ১১ ডিজিটের ${method} নম্বর দিন (013–019)।`;
-    }
+    if (!/^01[3-9]\d{8}$/.test(clean)) return `ভ্যালিড ১১ ডিজিটের ${method} নম্বর দিন (013–019)।`;
   } else if (method === "Binance USDT") {
     const okBep20 = /^0x[a-fA-F0-9]{40}$/.test(acc);
     const okTrc20 = /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(acc);
     const okPayId = /^\d{6,12}$/.test(acc);
-    if (!okBep20 && !okTrc20 && !okPayId) {
-      return "ভ্যালিড Binance USDT অ্যাড্রেস (TRC20/BEP20) বা Pay ID দিন।";
-    }
+    if (!okBep20 && !okTrc20 && !okPayId) return "ভ্যালিড Binance USDT অ্যাড্রেস বা Pay ID দিন।";
   }
   return "";
 }
@@ -3452,9 +3430,7 @@ async function saveW() {
   const acc = document.getElementById("w-acc").value.trim();
   const pin = document.getElementById("w-pin-set").value.trim();
   const localErr = clientValidateWallet(PAY, acc, pin);
-  if (localErr) {
-    return notify(localErr);
-  }
+  if (localErr) return notify(localErr);
   const r = await fetch("/api/wallet/connect", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -3473,32 +3449,21 @@ async function saveW() {
 async function reqWithdraw() {
   const val = parseInt(document.getElementById("w-pts-val").value || "0", 10);
   const pin = document.getElementById("w-pin-confirm").value.trim();
-  if (!/^\d{4}$/.test(pin)) {
-    return notify("আগে ৪ সংখ্যার পিন দিন");
-  }
-  if (PAY === "Binance USDT" && val < 15000) {
-    return notify("বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5) হলে উইথড্র পাবেন");
-  }
-  if (PAY !== "Binance USDT" && val < 1500) {
-    return notify("সর্বনিম্ন ১,৫০০ PTS হলে উইথড্র নিতে পারবেন");
-  }
+  if (!/^\d{4}$/.test(pin)) return notify("আগে ৪ সংখ্যার পিন দিন");
+  if (PAY === "Binance USDT" && val < 15000) return notify("বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5) হলে উইথড্র পাবেন");
+  if (PAY !== "Binance USDT" && val < 1500) return notify("সর্বনিম্ন ১,৫০০ PTS হলে উইথড্র নিতে পারবেন");
   const r = await fetch("/api/withdraw/request", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
-      user_id: USER,
-      tg_id: TG_ID,
-      tg_username: TG_USERNAME,
-      init_data: TG_INIT_DATA,
-      requested_pts: val,
-      pin,
-      method: PAY
+      user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA,
+      requested_pts: val, pin, method: PAY
     })
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("w-pin-confirm").value = "";
     paintPin();
-    notify(`Withdraw #${r.withdraw_id} sent (${r.telegram_username || ""} ID:${r.telegram_id || ""})`);
+    notify(`Withdraw #${r.withdraw_id} sent`);
     await loadApp();
   } else {
     notify(r.error || "Withdraw failed");
@@ -3506,29 +3471,33 @@ async function reqWithdraw() {
 }
 
 async function loadApp() {
-  const q = new URLSearchParams({
-    user_id: USER,
-    tg_id: TG_ID,
-    tg_username: TG_USERNAME,
-    init_data: TG_INIT_DATA,
-    username: NAME,
-    ref: REF
-  });
-  const r = await fetch("/api/user/bootstrap?" + q.toString(), {
-    headers: authHeaders()
-  }).then(x => x.json());
-  if (r.ok) {
-    ST = r;
-    draw();
-  } else if (r.error) {
-    notify(r.error);
+  try {
+    const q = new URLSearchParams({
+      user_id: USER,
+      tg_id: TG_ID,
+      tg_username: TG_USERNAME,
+      init_data: TG_INIT_DATA,
+      username: NAME,
+      ref: REF
+    });
+    const r = await fetch("/api/user/bootstrap?" + q.toString(), {
+      headers: authHeaders()
+    }).then(x => x.json());
+    if (r && r.ok) {
+      ST = r;
+    } else if (r && r.error) {
+      notify(r.error);
+    }
+  } catch (err) {
+    console.error("Bootstrap error:", err);
   }
+  draw();
 }
 
-drawGames();
+renderWheelSvg();
+draw();
 
 setInterval(() => {
-  if (!ST) return;
   drawSpinClock();
   drawMiningUi();
   drawSessions();
@@ -3575,9 +3544,7 @@ ADMIN_3D_HTML = """<!DOCTYPE html>
     text-shadow: 0 6px 18px rgba(16, 185, 129, 0.25);
     line-height: 1.15;
   }
-  .hero-sub-3d {
-    font-size: 12px; color: #94a3b8; margin-top: 6px; font-weight: 600;
-  }
+  .hero-sub-3d { font-size: 12px; color: #94a3b8; margin-top: 6px; font-weight: 600; }
 
   .panel-3d {
     background: linear-gradient(175deg, rgba(26, 44, 52, 0.96) 0%, rgba(12, 21, 26, 0.99) 100%);
