@@ -1349,7 +1349,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
     line-height: 1.45; box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
   }
 
-  /* Photo 2 3D Game Arena Style */
   .g-3d-card {
     display: flex; align-items: center; justify-content: space-between; gap: 11px;
     background: linear-gradient(175deg, rgba(31, 50, 58, 0.96) 0%, rgba(15, 26, 31, 0.99) 55%, rgba(10, 17, 21, 1) 100%);
@@ -1382,7 +1381,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
     box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
   }
 
-  /* Photo 1 3D Invite & Earn Referral Style */
   .ref-stat-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
   .ref-stat-card {
     background: linear-gradient(175deg, rgba(28, 46, 54, 0.96), rgba(12, 21, 26, 0.99));
@@ -1417,7 +1415,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
     font-size: 12px; color: #cbd5e1; line-height: 1.5; margin-top: 8px;
   }
 
-  /* Playable Game & Ad Modal */
   .modal-bg {
     position: fixed; inset: 0; z-index: 80;
     background: rgba(3, 8, 11, 0.9); backdrop-filter: blur(8px);
@@ -1758,7 +1755,13 @@ MINI_APP_HTML = """<!DOCTYPE html>
         <button class="pay-btn-3d" style="padding:7px 12px;" onclick="toggleWForm()">Change Wallet</button>
       </div>
       <div id="w-form" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148, 163, 184, 0.14);">
-        <input class="inp" id="w-acc" placeholder="Wallet Number / Binance Address" />
+        <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-bottom:4px;">Select Method to Save</div>
+        <div class="pay-3" style="margin:6px 0 10px;">
+          <button type="button" class="pay-btn-3d active" id="wm-bKash" onclick="setPay('bKash')">bKash</button>
+          <button type="button" class="pay-btn-3d" id="wm-Nagad" onclick="setPay('Nagad')">Nagad</button>
+          <button type="button" class="pay-btn-3d" id="wm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
+        </div>
+        <input class="inp" id="w-acc" placeholder="Enter bKash Number (e.g. 017XXXXXXXX)" />
         <input class="inp" id="w-pin-set" type="password" maxlength="4" placeholder="Set 4-Digit PIN" />
         <button class="btn-3d-green" onclick="saveW()">Save Wallet & PIN</button>
       </div>
@@ -1902,7 +1905,17 @@ function setPay(m) {
   PAY = m;
   ["bKash", "Nagad", "Binance USDT"].forEach(k => {
     document.getElementById("pm-" + k).classList.toggle("active", k === m);
+    const wm = document.getElementById("wm-" + k);
+    if (wm) wm.classList.toggle("active", k === m);
   });
+  const accInp = document.getElementById("w-acc");
+  if (accInp) {
+    if (m === "Binance USDT") {
+      accInp.placeholder = "Enter Binance Pay ID / USDT Address";
+    } else {
+      accInp.placeholder = `Enter ${m} Number (e.g. 017XXXXXXXX)`;
+    }
+  }
   syncWCopy();
 }
 
@@ -2501,7 +2514,7 @@ async function saveW() {
   if (r.ok) {
     document.getElementById("w-pin-set").value = "";
     document.getElementById("w-form").style.display = "none";
-    notify("Wallet & 4-digit PIN saved");
+    notify(`${r.method} wallet & 4-digit PIN saved`);
     await loadApp();
   } else {
     notify(r.error || "Failed");
