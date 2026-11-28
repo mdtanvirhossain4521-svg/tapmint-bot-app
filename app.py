@@ -2143,8 +2143,8 @@ MINI_APP_HTML = """<!DOCTYPE html>
     </div>
 
     <div style="text-align:center;margin-bottom:12px;">
-      <div class="acct-pill" id="am-badge" style="display:inline-block;">✓ Verified</div>
-      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-top:8px;" id="am-name">—</div>
+      <div style="font-size:16px;font-weight:800;color:#ffffff;" id="am-name">—</div>
+      <div class="acct-pill" id="am-badge" style="display:inline-block;margin-top:8px;">✓ Verified</div>
     </div>
 
     <div class="acct-detail-row">
@@ -2644,6 +2644,7 @@ function goPage(p) {
   document.querySelectorAll(".bnav-item").forEach(x => x.classList.remove("active"));
   document.getElementById("page-" + p).classList.add("active");
   document.getElementById("bi-" + p).classList.add("active");
+  if (p === "games") drawGames();
 }
 
 function toggleWForm() {
@@ -3523,6 +3524,8 @@ async function loadApp() {
     notify(r.error);
   }
 }
+
+drawGames();
 
 setInterval(() => {
   if (!ST) return;
