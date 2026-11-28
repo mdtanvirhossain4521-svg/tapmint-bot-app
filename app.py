@@ -15,8 +15,9 @@ ADMIN_KEY = os.environ.get("TAPMINT_ADMIN_KEY", "TAPMINT_ADMIN_99")
 MASTER_REF = os.environ.get("TAPMINT_MASTER_REF", "ref_tapmint99bot")
 SECRET_SALT = os.environ.get("TAPMINT_SECRET_SALT", "tapmint_secret_salt_2026")
 
-GENERAL_MIN_WITHDRAW_PTS = 1000
-BINANCE_MIN_WITHDRAW_PTS = 1500
+GENERAL_MIN_WITHDRAW_PTS = 1500
+BINANCE_MIN_WITHDRAW_PTS = 15000
+BINANCE_PTS_PER_USD = 3000
 BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
@@ -473,6 +474,7 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
         "withdraw_rules": {
             "general_min_pts": GENERAL_MIN_WITHDRAW_PTS,
             "binance_min_pts": BINANCE_MIN_WITHDRAW_PTS,
+            "binance_pts_per_usd": BINANCE_PTS_PER_USD,
             "binance_min_usdt_rule": BINANCE_MIN_USDT_EQUIVALENT,
             "fee_rate": WITHDRAW_FEE_RATE,
             "binance_network_fee_pts": BINANCE_NETWORK_FEE_PTS,
@@ -868,9 +870,21 @@ def api_withdraw_request():
         if not hmac.compare_digest(w["pin_hash"], hash_pin(pin)):
             return jsonify({"ok": False, "error": "Invalid 4-digit PIN"}), 400
 
-        min_req = BINANCE_MIN_WITHDRAW_PTS if method == "Binance USDT" else GENERAL_MIN_WITHDRAW_PTS
-        if req_pts < min_req:
-            return jsonify({"ok": False, "error": f"Minimum {min_req} PTS required for {method}"}), 400
+        if method == "Binance USDT":
+            min_req = BINANCE_MIN_WITHDRAW_PTS
+            if req_pts < min_req:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Binance উইথড্রতে সর্বনিম্ন {min_req:,} PTS (৫ ডলার) প্রয়োজন"
+                }), 400
+        else:
+            min_req = GENERAL_MIN_WITHDRAW_PTS
+            if req_pts < min_req:
+                return jsonify({
+                    "ok": False,
+                    "error": f"সর্বনিম্ন {min_req:,} PTS প্রয়োজন"
+                }), 400
+
         if req_pts > int(u["pts_balance"]):
             return jsonify({"ok": False, "error": "Insufficient PTS balance"}), 400
 
@@ -878,6 +892,7 @@ def api_withdraw_request():
         net_fee = BINANCE_NETWORK_FEE_PTS if method == "Binance USDT" else 0
         total_fee = min(req_pts - 1, pct_fee + net_fee)
         net_pts = req_pts - total_fee
+        usd_value = round(req_pts / BINANCE_PTS_PER_USD, 2) if method == "Binance USDT" else 0.0
 
         ts = iso_now()
         s_hash = make_security_hash(user_id, f"withdraw:{method}", req_pts, ts)
@@ -902,6 +917,7 @@ def api_withdraw_request():
             "requested_pts": req_pts,
             "fee_pts": total_fee,
             "net_pts": net_pts,
+            "usd_value": usd_value,
             "status": "pending",
         })
     finally:
@@ -1722,7 +1738,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   <section class="page" id="page-wallet">
     <div style="margin-bottom:12px;">
       <div style="font-size:20px;font-weight:800;">Wallet & Withdraw</div>
-      <div class="muted" style="margin-top:2px;" id="w-sub">সর্বনিম্ন ১,০০০ PTS হলে উইথড্র নিতে পারবেন</div>
+      <div class="muted" style="margin-top:2px;" id="w-sub">সর্বনিম্ন ১,৫০০ PTS হলে উইথড্র নিতে পারবেন • বাইনান্সে ১৫,০০০ PTS ($5)</div>
     </div>
 
     <div class="card-3d" style="text-align:center;">
@@ -1769,11 +1785,11 @@ MINI_APP_HTML = """<!DOCTYPE html>
         <button class="pay-btn-3d" id="pm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
       </div>
 
-      <div style="font-size:13px;font-weight:700;margin-bottom:6px;" id="w-pts-lbl">Points to Withdraw (Min 1,000)</div>
-      <input class="inp" id="w-pts-val" type="number" placeholder="1,000" />
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px;" id="w-pts-lbl">Points to Withdraw (Min 1,500)</div>
+      <input class="inp" id="w-pts-val" type="number" placeholder="1,500" />
       <div class="muted" style="font-size:11px;line-height:1.45;margin-bottom:12px;" id="w-fee-txt">
         উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>
-        *Binance withdrawals incur standard network fees.
+        *Binance withdrawals require min 15,000 PTS ($5) & incur standard network fees.
       </div>
       <button class="btn-3d-green" onclick="reqWithdraw()">
         Send Withdraw Request
@@ -1893,15 +1909,21 @@ function setPay(m) {
 function syncWCopy() {
   if (!ST) return;
   const wr = ST.withdraw_rules;
-  document.getElementById("w-sub").textContent = `সর্বনিম্ন ${wr.general_min_pts.toLocaleString()} PTS হলে উইথড্র নিতে পারবেন`;
+  const ptsInput = document.getElementById("w-pts-val");
+  document.getElementById("w-sub").textContent =
+    `সর্বনিম্ন ${wr.general_min_pts.toLocaleString()} PTS হলে উইথড্র নিতে পারবেন • বাইনান্সে ১৫,০০০ PTS ($5)`;
   if (PAY === "Binance USDT") {
-    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.binance_min_pts.toLocaleString()})`;
+    document.getElementById("w-pts-lbl").textContent =
+      `Points to Withdraw (Min ${wr.binance_min_pts.toLocaleString()} = $${wr.binance_min_usdt_rule})`;
+    ptsInput.placeholder = "15,000";
     document.getElementById("w-fee-txt").innerHTML =
-      `উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>*Binance USDT minimum $${wr.binance_min_usdt_rule} equivalent & standard network fees apply.`;
+      `১৫,০০০ PTS হলে $${wr.binance_min_usdt_rule} (৫ ডলার) উইথড্র পাবেন।<br/>*বাইনান্স পেমেন্টের সময় নির্ধারিত প্রসেসিং ও নেটওয়ার্ক ফি কেটে নেওয়া হবে।`;
   } else {
-    document.getElementById("w-pts-lbl").textContent = `Points to Withdraw (Min ${wr.general_min_pts.toLocaleString()})`;
+    document.getElementById("w-pts-lbl").textContent =
+      `Points to Withdraw (Min ${wr.general_min_pts.toLocaleString()})`;
+    ptsInput.placeholder = "1,500";
     document.getElementById("w-fee-txt").innerHTML =
-      `উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>*Binance withdrawals incur standard network fees.`;
+      `উইথড্র রিকোয়েস্ট সাবমিট করলে নির্ধারিত ফি কেটে নেওয়া হবে।<br/>*সর্বনিম্ন উইথড্র ১,৫০০ PTS • বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5)।`;
   }
 }
 
@@ -2489,6 +2511,12 @@ async function saveW() {
 async function reqWithdraw() {
   const val = parseInt(document.getElementById("w-pts-val").value || "0", 10);
   const pin = document.getElementById("w-pin-confirm").value.trim();
+  if (PAY === "Binance USDT" && val < 15000) {
+    return notify("বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5) হলে উইথড্র পাবেন");
+  }
+  if (PAY !== "Binance USDT" && val < 1500) {
+    return notify("সর্বনিম্ন ১,৫০০ PTS হলে উইথড্র নিতে পারবেন");
+  }
   const r = await fetch("/api/withdraw/request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2497,7 +2525,7 @@ async function reqWithdraw() {
   if (r.ok) {
     document.getElementById("w-pin-confirm").value = "";
     paintPin();
-    notify(`Withdraw #${r.withdraw_id} sent`);
+    notify(`Withdraw #${r.withdraw_id} sent (Fee: ${r.fee_pts} PTS)`);
     await loadApp();
   } else {
     notify(r.error || "Withdraw failed");
