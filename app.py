@@ -176,7 +176,6 @@ def verify_telegram_init_data(init_data: str) -> tuple[bool, dict | None]:
             return True, user_obj
         return False, user_obj
 
-    # If TELEGRAM_BOT_TOKEN is not set in env, accept structured Telegram user payload
     if user_obj and str(user_obj.get("id", "")).isdigit():
         return True, user_obj
     return False, user_obj
@@ -201,6 +200,13 @@ def resolve_identity(req, data: dict | None = None) -> dict:
         or ""
     ).strip()
 
+    tg_user_raw = (
+        req.headers.get("X-Telegram-Username")
+        or req.args.get("tg_username")
+        or payload.get("tg_username")
+        or ""
+    ).strip().lstrip("@")
+
     req_uid = (
         req.headers.get("X-User-Id")
         or req.args.get("user_id")
@@ -221,7 +227,7 @@ def resolve_identity(req, data: dict | None = None) -> dict:
         tg_id = str(tg_user["id"])
         first_name = (tg_user.get("first_name") or "").strip()
         last_name = (tg_user.get("last_name") or "").strip()
-        tg_handle = (tg_user.get("username") or "").strip()
+        tg_handle = (tg_user.get("username") or tg_user_raw or "").strip().lstrip("@")
         full_name = f"{first_name} {last_name}".strip() or (f"@{tg_handle}" if tg_handle else f"TG_{tg_id}")
         return {
             "user_id": f"tg_{tg_id}",
@@ -233,11 +239,11 @@ def resolve_identity(req, data: dict | None = None) -> dict:
         }
 
     if tg_id_raw.isdigit():
-        clean_name = req_name or f"TG_{tg_id_raw}"
+        clean_name = req_name or (f"@{tg_user_raw}" if tg_user_raw else f"TG_{tg_id_raw}")
         return {
             "user_id": f"tg_{tg_id_raw}",
             "telegram_id": tg_id_raw,
-            "telegram_username": "",
+            "telegram_username": tg_user_raw,
             "username": clean_name[:64],
             "is_telegram_verified": True,
             "auth_mode": "telegram_id",
@@ -249,7 +255,7 @@ def resolve_identity(req, data: dict | None = None) -> dict:
         return {
             "user_id": clean_uid,
             "telegram_id": parsed_tg,
-            "telegram_username": "",
+            "telegram_username": tg_user_raw,
             "username": (req_name or clean_uid)[:64],
             "is_telegram_verified": bool(parsed_tg),
             "auth_mode": "account_session",
@@ -295,7 +301,6 @@ def validate_wallet_credentials(method: str, target: str, pin: str) -> tuple[boo
             )
         return True, "", digits_only
 
-    # Binance USDT validation: BEP20 address, TRC20 address, or Binance Pay ID
     if BEP20_RE.match(t):
         return True, "", t.lower()
     if TRC20_RE.match(t):
@@ -423,6 +428,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
+                telegram_id TEXT DEFAULT '',
+                telegram_username TEXT DEFAULT '',
                 method TEXT NOT NULL,
                 account_target TEXT NOT NULL,
                 requested_pts INTEGER NOT NULL,
@@ -457,6 +464,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''")
         if "is_telegram_verified" not in ucols:
             conn.execute("ALTER TABLE users ADD COLUMN is_telegram_verified INTEGER NOT NULL DEFAULT 0")
+
+        wd_cols = [r["name"] for r in conn.execute("PRAGMA table_info(withdrawals)").fetchall()]
+        if "telegram_id" not in wd_cols:
+            conn.execute("ALTER TABLE withdrawals ADD COLUMN telegram_id TEXT DEFAULT ''")
+        if "telegram_username" not in wd_cols:
+            conn.execute("ALTER TABLE withdrawals ADD COLUMN telegram_username TEXT DEFAULT ''")
 
         wcols = [r["name"] for r in conn.execute("PRAGMA table_info(wallets)").fetchall()]
         if "is_verified" not in wcols:
@@ -518,8 +531,8 @@ def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
 def ensure_user_from_identity(conn: sqlite3.Connection, ident: dict, ref: str = "") -> bool:
     clean_uid = (ident.get("user_id") or "user_1001").strip()[:64]
     tg_id = (ident.get("telegram_id") or "").strip()[:32]
-    tg_handle = (ident.get("telegram_username") or "").strip()[:64]
-    is_tg_ver = 1 if ident.get("is_telegram_verified") else 0
+    tg_handle = (ident.get("telegram_username") or "").strip().lstrip("@")[:64]
+    is_tg_ver = 1 if (ident.get("is_telegram_verified") and tg_id) else 0
     clean_name = (ident.get("username") or "TapMintUser").strip()[:64]
     clean_ref = (ref or "").strip()[:64]
     ts = iso_now()
@@ -714,13 +727,17 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
         (user_id,),
     ).fetchone()["s"]
 
+    tg_id_val = (u["telegram_id"] or "").strip()
+    tg_user_val = (u["telegram_username"] or "").strip().lstrip("@")
+    is_tg_ver = bool(int(u["is_telegram_verified"] or 0) == 1 and tg_id_val)
+
     return {
         "ok": True,
         "user": {
             "user_id": u["user_id"],
-            "telegram_id": u["telegram_id"] or "",
-            "telegram_username": u["telegram_username"] or "",
-            "is_telegram_verified": bool(u["is_telegram_verified"]),
+            "telegram_id": tg_id_val,
+            "telegram_username": tg_user_val,
+            "is_telegram_verified": is_tg_ver,
             "username": u["username"],
             "pts_balance": int(u["pts_balance"]),
             "total_earned_pts": int(u["total_earned_pts"]),
@@ -1224,6 +1241,11 @@ def api_withdraw_request():
         u = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         w = conn.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,)).fetchone()
 
+        tg_id_val = (ident.get("telegram_id") or u["telegram_id"] or "").strip()
+        tg_user_val = (ident.get("telegram_username") or u["telegram_username"] or "").strip().lstrip("@")
+        if not tg_id_val or int(u["is_telegram_verified"] or 0) != 1:
+            return jsonify({"ok": False, "error": "আগে নিজস্ব টেলিগ্রাম আইডি দিয়ে একাউন্ট ভেরিফাই করুন।"}), 400
+
         if not w or int(w["is_connected"]) != 1 or int(w["is_verified"]) != 1 or not w["pin_hash"]:
             return jsonify({"ok": False, "error": "আগে বৈধ পেমেন্ট ওয়ালেট ও পিন ভেরিফাই করুন।"}), 400
         if not hmac.compare_digest(w["pin_hash"], hash_pin(pin)):
@@ -1268,17 +1290,19 @@ def api_withdraw_request():
         cur = conn.execute(
             """
             INSERT INTO withdrawals (
-                user_id, method, account_target, requested_pts, fee_pts, net_pts,
-                status, security_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                user_id, telegram_id, telegram_username, method, account_target,
+                requested_pts, fee_pts, net_pts, status, security_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
-            (user_id, method, w["account_target"], req_pts, total_fee, net_pts, s_hash, ts),
+            (user_id, tg_id_val, tg_user_val, method, w["account_target"], req_pts, total_fee, net_pts, s_hash, ts),
         )
         wid = cur.lastrowid
         conn.commit()
         return jsonify({
             "ok": True,
             "withdraw_id": wid,
+            "telegram_id": tg_id_val,
+            "telegram_username": f"@{tg_user_val}" if tg_user_val else "",
             "requested_pts": req_pts,
             "fee_pts": total_fee,
             "net_pts": net_pts,
@@ -1328,6 +1352,7 @@ def api_admin_overview():
             hardworking_users.append({
                 "user_id": u["user_id"],
                 "telegram_id": u["telegram_id"] or "",
+                "telegram_username": u["telegram_username"] or "",
                 "is_telegram_verified": bool(u["is_telegram_verified"]),
                 "username": u["username"],
                 "total_earned_pts": int(u["total_earned_pts"] or 0),
@@ -1341,6 +1366,7 @@ def api_admin_overview():
                 saved_wallets.append({
                     "user_id": u["user_id"],
                     "telegram_id": u["telegram_id"] or "",
+                    "telegram_username": u["telegram_username"] or "",
                     "username": u["username"],
                     "method": u["wallet_method"],
                     "account_target": u["wallet_target"],
@@ -1626,6 +1652,11 @@ MINI_APP_HTML = """<!DOCTYPE html>
     font-size: 11px; font-weight: 700; color: #a7f3d0;
     background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(52, 211, 153, 0.35);
     padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  }
+  .acct-pill.unverified {
+    color: #fbbf24;
+    background: rgba(120, 53, 15, 0.25);
+    border-color: rgba(245, 158, 11, 0.4);
   }
 
   .card-3d {
@@ -2090,10 +2121,48 @@ MINI_APP_HTML = """<!DOCTYPE html>
     background: #132a30; border: 1px solid #34d399; color: #ecfdf5;
     padding: 10px 16px; border-radius: 12px; font-size: 13px; font-weight: 700; display: none;
   }
+  .acct-detail-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 11px; border-radius: 11px;
+    background: rgba(8, 15, 19, 0.85); border: 1px solid rgba(148, 163, 184, 0.16);
+    margin-bottom: 8px; font-size: 12px;
+  }
 </style>
 </head>
 <body>
 <div class="toast" id="toast"></div>
+
+<div class="modal-bg" id="account-modal" onclick="if(event.target===this)closeAccountModal()">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div>
+        <div style="font-size:17px;font-weight:800;color:#ffffff;">Telegram Account Details</div>
+        <div class="muted" style="font-size:11px;margin-top:2px;">আপনার নিজস্ব টেলিগ্রাম প্রোফাইল ও ভেরিফিকেশন তথ্য</div>
+      </div>
+      <button class="pay-btn-3d" style="padding:6px 10px;" onclick="closeAccountModal()">✕</button>
+    </div>
+
+    <div style="text-align:center;margin-bottom:12px;">
+      <div class="acct-pill" id="am-badge" style="display:inline-block;">✓ Verified</div>
+      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-top:8px;" id="am-name">—</div>
+    </div>
+
+    <div class="acct-detail-row">
+      <span style="color:#94a3b8;">Telegram Username</span>
+      <strong style="color:#38bdf8;" id="am-username">—</strong>
+    </div>
+    <div class="acct-detail-row">
+      <span style="color:#94a3b8;">Telegram ID</span>
+      <strong style="color:#4ade80;" id="am-tgid">—</strong>
+    </div>
+    <div class="acct-detail-row">
+      <span style="color:#94a3b8;">Account ID</span>
+      <strong style="color:#e2e8f0;" id="am-uid">—</strong>
+    </div>
+
+    <button class="btn-3d-green" style="margin-top:6px;" onclick="closeAccountModal()">ঠিক আছে</button>
+  </div>
+</div>
 
 <div class="modal-bg" id="game-modal">
   <div class="modal-box">
@@ -2134,22 +2203,22 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
 <div class="phone-frame">
   <div class="tg-top">
-    <div>
+    <div onclick="openAccountModal()" style="cursor:pointer;">
       <div class="tg-brand">TapMint <span class="tg-badge">✓</span></div>
-      <div class="tg-sub" id="acct-sub">Checking Telegram Account...</div>
+      <div class="tg-sub" id="acct-sub">Loading Telegram Profile...</div>
     </div>
-    <div style="text-align:right;">
-      <div class="acct-pill" id="acct-badge">Auto-Verified</div>
+    <div style="text-align:right;cursor:pointer;" onclick="openAccountModal()">
+      <div class="acct-pill" id="acct-badge">Telegram Auth</div>
       <div class="muted" style="font-weight:700;margin-top:3px;" id="hdr-pts">0 PTS</div>
     </div>
   </div>
 
   <section class="page active" id="page-home">
-    <div class="card-3d" style="padding:11px 14px;">
+    <div class="card-3d" style="padding:11px 14px;cursor:pointer;" onclick="openAccountModal()">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div>
           <div style="font-size:13px;font-weight:800;color:#ffffff;" id="prof-name">TapMint Account</div>
-          <div class="muted" style="font-size:11px;margin-top:2px;" id="prof-meta">Telegram ID: — • Account: —</div>
+          <div class="muted" style="font-size:11px;margin-top:2px;" id="prof-meta">Telegram Username: — • Telegram ID: —</div>
         </div>
         <div class="acct-pill" id="prof-ver-pill">✓ Verified</div>
       </div>
@@ -2461,13 +2530,17 @@ const TG_ID = TG_USER_OBJ && TG_USER_OBJ.id
   ? String(TG_USER_OBJ.id)
   : (qp.get("tg_id") || "");
 
+const TG_USERNAME = TG_USER_OBJ && TG_USER_OBJ.username
+  ? String(TG_USER_OBJ.username).replace(/^@/, "")
+  : (qp.get("tg_username") || "").replace(/^@/, "");
+
 const USER = TG_ID
   ? `tg_${TG_ID}`
   : (qp.get("user_id") || "user_1001");
 
 const NAME = TG_USER_OBJ && TG_USER_OBJ.id
-  ? (`${TG_USER_OBJ.first_name || ""} ${TG_USER_OBJ.last_name || ""}`.trim() || (TG_USER_OBJ.username ? `@${TG_USER_OBJ.username}` : `TG_${TG_ID}`))
-  : (qp.get("username") || (TG_ID ? `TG_${TG_ID}` : "TapMintUser"));
+  ? (`${TG_USER_OBJ.first_name || ""} ${TG_USER_OBJ.last_name || ""}`.trim() || (TG_USERNAME ? `@${TG_USERNAME}` : `TG_${TG_ID}`))
+  : (qp.get("username") || (TG_USERNAME ? `@${TG_USERNAME}` : (TG_ID ? `TG_${TG_ID}` : "TapMintUser")));
 
 const REF = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.start_param)
   ? String(tgWebApp.initDataUnsafe.start_param)
@@ -2479,8 +2552,32 @@ function authHeaders(extra = {}) {
     "X-Username": NAME,
   }, extra);
   if (TG_ID) h["X-Telegram-Id"] = TG_ID;
+  if (TG_USERNAME) h["X-Telegram-Username"] = TG_USERNAME;
   if (TG_INIT_DATA) h["X-Telegram-Init-Data"] = TG_INIT_DATA;
   return h;
+}
+
+function openAccountModal() {
+  const u = (ST && ST.user) ? ST.user : {
+    user_id: USER,
+    telegram_id: TG_ID,
+    telegram_username: TG_USERNAME,
+    is_telegram_verified: Boolean(TG_ID),
+    username: NAME
+  };
+  const badgeEl = document.getElementById("am-badge");
+  const isVer = Boolean(u.is_telegram_verified && u.telegram_id);
+  badgeEl.textContent = isVer ? "✓ Verified Telegram Account" : "Unverified Account";
+  badgeEl.classList.toggle("unverified", !isVer);
+  document.getElementById("am-name").textContent = u.username || NAME;
+  document.getElementById("am-username").textContent = u.telegram_username ? `@${u.telegram_username}` : "Not set";
+  document.getElementById("am-tgid").textContent = u.telegram_id || "Unavailable";
+  document.getElementById("am-uid").textContent = u.user_id || USER;
+  document.getElementById("account-modal").classList.add("open");
+}
+
+function closeAccountModal() {
+  document.getElementById("account-modal").classList.remove("open");
 }
 
 const WHEEL_SLOTS = [
@@ -2684,12 +2781,20 @@ function draw() {
   document.getElementById("home-bal").textContent = b.toLocaleString() + " PTS";
   document.getElementById("w-bal").textContent = b.toLocaleString() + " PTS";
 
-  const tgLabel = u.telegram_id ? `TG ID: ${u.telegram_id}` : `Account: ${u.user_id}`;
-  document.getElementById("acct-sub").textContent = `${u.username} • ${tgLabel}`;
-  document.getElementById("acct-badge").textContent = u.is_telegram_verified ? "TG Auto-Verified" : "Personal Account";
-  document.getElementById("prof-name").textContent = u.username;
-  document.getElementById("prof-meta").textContent = `Telegram ID: ${u.telegram_id || "Web Session"} • Account ID: ${u.user_id}`;
-  document.getElementById("prof-ver-pill").textContent = u.is_telegram_verified ? "✓ TG Verified" : "● Active Account";
+  const isVer = Boolean(u.is_telegram_verified && u.telegram_id);
+  const handleText = u.telegram_username ? `@${u.telegram_username}` : u.username;
+  const tgIdText = u.telegram_id ? `ID: ${u.telegram_id}` : `Account: ${u.user_id}`;
+
+  document.getElementById("acct-sub").textContent = `${handleText} • ${tgIdText}`;
+  const topBadge = document.getElementById("acct-badge");
+  topBadge.textContent = isVer ? "✓ TG Verified" : "Unverified";
+  topBadge.classList.toggle("unverified", !isVer);
+
+  document.getElementById("prof-name").textContent = `${u.username}${u.telegram_username ? ` (@${u.telegram_username})` : ""}`;
+  document.getElementById("prof-meta").textContent = `Telegram ID: ${u.telegram_id || "—"} • Username: ${u.telegram_username ? `@${u.telegram_username}` : "—"}`;
+  const profPill = document.getElementById("prof-ver-pill");
+  profPill.textContent = isVer ? "✓ Verified" : "Unverified";
+  profPill.classList.toggle("unverified", !isVer);
 
   drawDayTracker(ST.spin.spin_streak_days);
   drawSpinClock();
@@ -2808,7 +2913,7 @@ async function startTask(sNum, tNum) {
   const op = await fetch("/api/task/open", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
   }).then(r => r.json());
   if (!op.ok) {
     notify(op.error || "Cannot open task");
@@ -2830,7 +2935,7 @@ async function startTask(sNum, tNum) {
       const cp = await fetch("/api/task/complete", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
       }).then(r => r.json());
       if (cp.ok) {
         notify(`+${cp.pts_earned} PTS earned!`);
@@ -2848,7 +2953,7 @@ async function doSpin() {
   const r = await fetch("/api/spin", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
   }).then(x => x.json());
   if (!r.ok) return notify(r.error || "Spin not ready");
 
@@ -2875,7 +2980,7 @@ async function doMining() {
   const r = await fetch("/api/mining/claim", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME })
   }).then(x => x.json());
   if (r.ok) {
     notify(`+${r.pts_earned} PTS mined!`);
@@ -2886,10 +2991,10 @@ async function doMining() {
 }
 
 const GAMES_CONFIG = [
-  { ico: "🕹", title: "Tap Surge Combo", tgtText: "Hard Target: 75+", targetVal: 75, timeSec: 16, pts: 2, mode: "tap" },
-  { ico: "👾", title: "Catch & Dodge 3D", tgtText: "Hard Target: 35+", targetVal: 35, timeSec: 18, pts: 2, mode: "catch" },
+  { ico: "👾", title: "Catch & Dodge", tgtText: "Hard Target: 35+", targetVal: 35, timeSec: 18, pts: 2, mode: "catch" },
   { ico: "🔢", title: "Number Merge 2048", tgtText: "Hard Target: 90+ Pts", targetVal: 90, timeSec: 22, pts: 2, mode: "merge" },
-  { ico: "🐍", title: "Neon Snake Arcade", tgtText: "Hard Target: 40+", targetVal: 40, timeSec: 20, pts: 2, mode: "snake" },
+  { ico: "🐍", title: "Snake", tgtText: "Hard Target: 40+", targetVal: 40, timeSec: 20, pts: 2, mode: "snake" },
+  { ico: "🕹", title: "Tap Surge Combo", tgtText: "Hard Target: 75+", targetVal: 75, timeSec: 16, pts: 2, mode: "tap" },
 ];
 
 function drawGames() {
@@ -2953,7 +3058,7 @@ async function openPlayableGame(title) {
   const st = await fetch("/api/game/start", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
   }).then(x => x.json());
   if (!st.ok) return notify(st.error || "Cannot start game");
 
@@ -3200,7 +3305,7 @@ async function launchGameAdWindow() {
   await fetch("/api/game/ad-open", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
   });
   if (GM.adUrl) {
     window.open(GM.adUrl, "_blank", "noopener,noreferrer");
@@ -3212,7 +3317,7 @@ function relaunchGameAd() {
   fetch("/api/game/ad-open", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
   });
 }
 
@@ -3225,7 +3330,7 @@ document.addEventListener("visibilitychange", async () => {
       await fetch("/api/game/ad-open", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
       });
     }
   } else if (GM.leftAdWindow) {
@@ -3234,7 +3339,7 @@ document.addEventListener("visibilitychange", async () => {
       const cp = await fetch("/api/game/ad-complete", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
       }).then(x => x.json());
       if (cp.ok) {
         document.getElementById("gm-ad-timer").textContent = "৮–১০s সম্পন্ন ✓ ব্যাক এসেছেন, ক্লেম করুন!";
@@ -3274,7 +3379,7 @@ async function triggerGameAdStage() {
         await fetch("/api/game/ad-complete", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
         });
       }
       document.getElementById("gm-ad-timer").textContent = "8–10s Complete ✓ Ready to Claim!";
@@ -3294,7 +3399,7 @@ async function claimGameReward() {
   const cl = await fetch("/api/game/claim", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, session_token: GM.token })
   }).then(x => x.json());
   if (cl.ok) {
     closeGameModal();
@@ -3352,7 +3457,7 @@ async function saveW() {
   const r = await fetch("/api/wallet/connect", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, method: PAY, account_target: acc, pin })
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, tg_username: TG_USERNAME, init_data: TG_INIT_DATA, username: NAME, method: PAY, account_target: acc, pin })
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("w-pin-set").value = "";
@@ -3379,12 +3484,20 @@ async function reqWithdraw() {
   const r = await fetch("/api/withdraw/request", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, requested_pts: val, pin, method: PAY })
+    body: JSON.stringify({
+      user_id: USER,
+      tg_id: TG_ID,
+      tg_username: TG_USERNAME,
+      init_data: TG_INIT_DATA,
+      requested_pts: val,
+      pin,
+      method: PAY
+    })
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("w-pin-confirm").value = "";
     paintPin();
-    notify(`Withdraw #${r.withdraw_id} sent (Fee: ${r.fee_pts} PTS)`);
+    notify(`Withdraw #${r.withdraw_id} sent (${r.telegram_username || ""} ID:${r.telegram_id || ""})`);
     await loadApp();
   } else {
     notify(r.error || "Withdraw failed");
@@ -3395,6 +3508,7 @@ async function loadApp() {
   const q = new URLSearchParams({
     user_id: USER,
     tg_id: TG_ID,
+    tg_username: TG_USERNAME,
     init_data: TG_INIT_DATA,
     username: NAME,
     ref: REF
@@ -3727,11 +3841,12 @@ async function loadPanel(showAlertOnFail = false) {
   for (let i = 0; i < (r.hardworking_users || []).length; i++) {
     const hu = r.hardworking_users[i];
     const tgTag = hu.telegram_id ? ` • TG:${hu.telegram_id}` : "";
+    const tgHandle = hu.telegram_username ? ` • @${hu.telegram_username}` : "";
     const div = document.createElement("div");
     div.className = "item-row";
     div.innerHTML = `
       <div>
-        <strong>#${i + 1} ${hu.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${hu.user_id}${tgTag})</span>
+        <strong>#${i + 1} ${hu.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${hu.user_id}${tgTag}${tgHandle})</span>
         ${hu.is_online ? `<span class="pill-on">● Active</span>` : `<span class="pill-off">Offline</span>`}<br/>
         <span style="font-size:12px;color:#cbd5e1;">Tasks Done: ${hu.tasks_done} • Bal: ${hu.pts_balance} PTS</span>
       </div>
@@ -3750,7 +3865,7 @@ async function loadPanel(showAlertOnFail = false) {
       div.className = "item-row";
       div.innerHTML = `
         <div>
-          <strong>${sw.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${sw.user_id})</span>
+          <strong>${sw.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${sw.user_id}${sw.telegram_id ? ` • TG:${sw.telegram_id}` : ""}${sw.telegram_username ? ` • @${sw.telegram_username}` : ""})</span>
           ${sw.verified ? `<span class="pill-on">✓ Verified</span>` : `<span class="pill-off">Unverified</span>`}<br/>
           <span style="font-size:12px;color:#34d399;font-weight:700;">${sw.method}:</span>
           <span style="font-size:12px;color:#ffffff;">${sw.account_target}</span>
@@ -3782,11 +3897,12 @@ async function loadPanel(showAlertOnFail = false) {
     wl.innerHTML = `<div style="font-size:13px;color:#94a3b8;">কোনো পেন্ডিং উইথড্র নেই</div>`;
   } else {
     for (const w of r.pending_withdrawals) {
+      const tgInfo = `${w.telegram_username ? `@${w.telegram_username}` : ""} ${w.telegram_id ? `(TG:${w.telegram_id})` : ""}`.trim();
       const div = document.createElement("div");
       div.className = "item-row";
       div.innerHTML = `
         <div>
-          <strong>#${w.id}</strong> • ${w.user_id} • ${w.method} (${w.account_target})<br/>
+          <strong>#${w.id}</strong> • ${w.user_id} ${tgInfo ? `<span style="color:#38bdf8;font-size:11px;">${tgInfo}</span>` : ""} • ${w.method} (${w.account_target})<br/>
           <span style="font-size:12px;color:#94a3b8;">Req: ${w.requested_pts} | Fee: ${w.fee_pts} | Net: ${w.net_pts}</span>
         </div>
         <div style="display:flex;gap:8px;">
