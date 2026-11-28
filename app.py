@@ -221,9 +221,9 @@ def resolve_identity(req, data: dict | None = None) -> dict:
     ).strip()
 
     req_name = (
-        req.headers.get("X-Username")
+        payload.get("username")
         or req.args.get("username")
-        or payload.get("username")
+        or req.headers.get("X-Username")
         or ""
     ).strip()
 
@@ -2547,14 +2547,21 @@ const REF = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.star
   ? String(tgWebApp.initDataUnsafe.start_param)
   : (qp.get("ref") || "");
 
+function safeHeaderVal(v) {
+  return String(v || "").replace(/[^\x20-\x7E]/g, "").trim();
+}
+
 function authHeaders(extra) {
   const h = Object.assign({
-    "X-User-Id": USER,
-    "X-Username": NAME,
+    "X-User-Id": safeHeaderVal(USER) || "user_1001",
+    "X-Username": safeHeaderVal(NAME) || "TapMintUser",
   }, extra || {});
-  if (TG_ID) h["X-Telegram-Id"] = TG_ID;
-  if (TG_USERNAME) h["X-Telegram-Username"] = TG_USERNAME;
-  if (TG_INIT_DATA) h["X-Telegram-Init-Data"] = TG_INIT_DATA;
+  const safeTgId = safeHeaderVal(TG_ID);
+  const safeTgUser = safeHeaderVal(TG_USERNAME);
+  const safeInit = safeHeaderVal(TG_INIT_DATA);
+  if (safeTgId) h["X-Telegram-Id"] = safeTgId;
+  if (safeTgUser) h["X-Telegram-Username"] = safeTgUser;
+  if (safeInit) h["X-Telegram-Init-Data"] = safeInit;
   return h;
 }
 
