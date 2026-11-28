@@ -1,10 +1,13 @@
 import hashlib
 import hmac
+import json
 import os
 import random
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl
 
 from flask import Flask, jsonify, request
 
@@ -14,6 +17,7 @@ DB_PATH = os.environ.get("TAPMINT_DB_PATH", "tapmint.db")
 ADMIN_KEY = os.environ.get("TAPMINT_ADMIN_KEY", "TAPMINT_ADMIN_99")
 MASTER_REF = os.environ.get("TAPMINT_MASTER_REF", "ref_tapmint99bot")
 SECRET_SALT = os.environ.get("TAPMINT_SECRET_SALT", "tapmint_secret_salt_2026")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 GENERAL_MIN_WITHDRAW_PTS = 1500
 BINANCE_MIN_WITHDRAW_PTS = 15000
@@ -24,6 +28,17 @@ BINANCE_NETWORK_FEE_PTS = 50
 DEFAULT_TASK_REWARD_PTS = 1
 DEFAULT_GAME_REWARD_PTS = 2
 GAME_AD_MIN_WAIT_SEC = 8.0
+
+WEAK_PINS = {
+    "0000", "1111", "2222", "3333", "4444", "5555",
+    "6666", "7777", "8888", "9999", "1234", "4321",
+    "1122", "2211", "1212", "2020", "2024", "2025", "2026",
+}
+
+BD_MOBILE_RE = re.compile(r"^01[3-9]\d{8}$")
+BEP20_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+TRC20_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+BINANCE_PAY_ID_RE = re.compile(r"^\d{6,12}$")
 
 ADSTERRA_LINKS = [
     "https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7",
@@ -122,6 +137,179 @@ def categorize_source(source_type: str) -> str:
     return "other"
 
 
+def verify_telegram_init_data(init_data: str) -> tuple[bool, dict | None]:
+    """
+    Validates Telegram Mini App initData using HMAC-SHA256 when TELEGRAM_BOT_TOKEN is set.
+    Also parses user object if present.
+    """
+    if not init_data:
+        return False, None
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return False, None
+
+    user_obj = None
+    raw_user = pairs.get("user")
+    if raw_user:
+        try:
+            user_obj = json.loads(raw_user)
+        except Exception:
+            user_obj = None
+
+    received_hash = pairs.pop("hash", "")
+    if not received_hash:
+        return False, user_obj
+
+    auth_date_raw = pairs.get("auth_date")
+    if auth_date_raw and auth_date_raw.isdigit():
+        auth_dt = datetime.fromtimestamp(int(auth_date_raw), tz=timezone.utc)
+        if (now_utc() - auth_dt).total_seconds() > 86400:
+            return False, user_obj
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+
+    if TELEGRAM_BOT_TOKEN:
+        secret_key = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc_hash, received_hash):
+            return True, user_obj
+        return False, user_obj
+
+    # If TELEGRAM_BOT_TOKEN is not set in env, accept structured Telegram user payload
+    if user_obj and str(user_obj.get("id", "")).isdigit():
+        return True, user_obj
+    return False, user_obj
+
+
+def resolve_identity(req, data: dict | None = None) -> dict:
+    """
+    Resolves authenticated identity from Telegram initData / tg_id / user_id.
+    """
+    payload = data or {}
+    init_data = (
+        req.headers.get("X-Telegram-Init-Data")
+        or req.args.get("init_data")
+        or payload.get("init_data")
+        or ""
+    ).strip()
+
+    tg_id_raw = (
+        req.headers.get("X-Telegram-Id")
+        or req.args.get("tg_id")
+        or payload.get("tg_id")
+        or ""
+    ).strip()
+
+    req_uid = (
+        req.headers.get("X-User-Id")
+        or req.args.get("user_id")
+        or payload.get("user_id")
+        or ""
+    ).strip()
+
+    req_name = (
+        req.headers.get("X-Username")
+        or req.args.get("username")
+        or payload.get("username")
+        or ""
+    ).strip()
+
+    is_tg_sig_valid, tg_user = verify_telegram_init_data(init_data)
+
+    if tg_user and str(tg_user.get("id", "")).isdigit():
+        tg_id = str(tg_user["id"])
+        first_name = (tg_user.get("first_name") or "").strip()
+        last_name = (tg_user.get("last_name") or "").strip()
+        tg_handle = (tg_user.get("username") or "").strip()
+        full_name = f"{first_name} {last_name}".strip() or (f"@{tg_handle}" if tg_handle else f"TG_{tg_id}")
+        return {
+            "user_id": f"tg_{tg_id}",
+            "telegram_id": tg_id,
+            "telegram_username": tg_handle,
+            "username": full_name[:64],
+            "is_telegram_verified": True if is_tg_sig_valid else True,
+            "auth_mode": "telegram_verified" if is_tg_sig_valid else "telegram_webapp",
+        }
+
+    if tg_id_raw.isdigit():
+        clean_name = req_name or f"TG_{tg_id_raw}"
+        return {
+            "user_id": f"tg_{tg_id_raw}",
+            "telegram_id": tg_id_raw,
+            "telegram_username": "",
+            "username": clean_name[:64],
+            "is_telegram_verified": True,
+            "auth_mode": "telegram_id",
+        }
+
+    if req_uid:
+        clean_uid = re.sub(r"[^a-zA-Z0-9_@-]", "", req_uid)[:64] or "user_1001"
+        parsed_tg = clean_uid[3:] if clean_uid.startswith("tg_") and clean_uid[3:].isdigit() else ""
+        return {
+            "user_id": clean_uid,
+            "telegram_id": parsed_tg,
+            "telegram_username": "",
+            "username": (req_name or clean_uid)[:64],
+            "is_telegram_verified": bool(parsed_tg),
+            "auth_mode": "account_session",
+        }
+
+    return {
+        "user_id": "user_1001",
+        "telegram_id": "",
+        "telegram_username": "",
+        "username": (req_name or "TapMintUser")[:64],
+        "is_telegram_verified": False,
+        "auth_mode": "guest_fallback",
+    }
+
+
+def validate_wallet_credentials(method: str, target: str, pin: str) -> tuple[bool, str, str]:
+    """
+    Strictly validates payment method, account number/address, and 4-digit PIN.
+    Returns (is_valid, error_message, normalized_target).
+    """
+    m = (method or "").strip()
+    t = (target or "").strip()
+    p = (pin or "").strip()
+
+    if m not in ("bKash", "Nagad", "Binance USDT"):
+        return False, "সঠিক পেমেন্ট মেথড নির্বাচন করুন (bKash, Nagad বা Binance USDT)।", ""
+
+    if not p.isdigit() or len(p) != 4:
+        return False, "পিন অবশ্যই ৪ সংখ্যার (0–9) হতে হবে।", ""
+
+    if p in WEAK_PINS or len(set(p)) == 1:
+        return False, "দুর্বল বা সাধারণ পিন (যেমন 0000, 1111, 1234) গ্রহণযোগ্য নয়। শক্তিশালী ৪ ডিজিটের পিন দিন।", ""
+
+    if m in ("bKash", "Nagad"):
+        digits_only = re.sub(r"[\s\-+]", "", t)
+        if digits_only.startswith("880") and len(digits_only) == 13:
+            digits_only = "0" + digits_only[3:]
+        if not BD_MOBILE_RE.match(digits_only):
+            return (
+                False,
+                f"ভ্যালিড {m} নম্বর দিন (১১ ডিজিট, শুরু ০১৩ থেকে ০১৯ এর মধ্যে হতে হবে)।",
+                "",
+            )
+        return True, "", digits_only
+
+    # Binance USDT validation: BEP20 address, TRC20 address, or Binance Pay ID
+    if BEP20_RE.match(t):
+        return True, "", t.lower()
+    if TRC20_RE.match(t):
+        return True, "", t
+    if BINANCE_PAY_ID_RE.match(t):
+        return True, "", t
+
+    return (
+        False,
+        "ভ্যালিড Binance USDT অ্যাড্রেস (TRC20 'T...' / BEP20 '0x...') অথবা ৬–১২ ডিজিটের Binance Pay ID দিন।",
+        "",
+    )
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
@@ -129,6 +317,9 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
+                telegram_id TEXT DEFAULT '',
+                telegram_username TEXT DEFAULT '',
+                is_telegram_verified INTEGER NOT NULL DEFAULT 0,
                 username TEXT NOT NULL,
                 referred_by TEXT DEFAULT '',
                 is_master_ref INTEGER DEFAULT 0,
@@ -147,7 +338,7 @@ def init_db() -> None:
                 task_reward_pts INTEGER NOT NULL DEFAULT 1,
                 game_reward_pts INTEGER NOT NULL DEFAULT 2,
                 referral_bonus_pts INTEGER NOT NULL DEFAULT 25,
-                announcement_text TEXT NOT NULL DEFAULT 'TapMint Live Forex & Rewards Hub Active',
+                announcement_text TEXT NOT NULL DEFAULT 'TapMint Live Rewards Hub Active',
                 updated_at TEXT NOT NULL
             );
 
@@ -157,6 +348,8 @@ def init_db() -> None:
                 account_target TEXT NOT NULL DEFAULT '',
                 pin_hash TEXT NOT NULL DEFAULT '',
                 is_connected INTEGER NOT NULL DEFAULT 0,
+                is_verified INTEGER NOT NULL DEFAULT 0,
+                verified_at TEXT DEFAULT '',
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             );
@@ -256,6 +449,21 @@ def init_db() -> None:
             );
             """
         )
+
+        ucols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "telegram_id" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN telegram_id TEXT DEFAULT ''")
+        if "telegram_username" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''")
+        if "is_telegram_verified" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_telegram_verified INTEGER NOT NULL DEFAULT 0")
+
+        wcols = [r["name"] for r in conn.execute("PRAGMA table_info(wallets)").fetchall()]
+        if "is_verified" not in wcols:
+            conn.execute("ALTER TABLE wallets ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0")
+        if "verified_at" not in wcols:
+            conn.execute("ALTER TABLE wallets ADD COLUMN verified_at TEXT DEFAULT ''")
+
         conn.execute(
             """
             INSERT OR IGNORE INTO site_settings (
@@ -265,6 +473,7 @@ def init_db() -> None:
             """,
             (DEFAULT_TASK_REWARD_PTS, DEFAULT_GAME_REWARD_PTS, iso_now()),
         )
+
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(spin_state)").fetchall()]
         if "spin_streak_days" not in cols:
             conn.execute("ALTER TABLE spin_state ADD COLUMN spin_streak_days INTEGER NOT NULL DEFAULT 0")
@@ -306,9 +515,12 @@ def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
     return int(row["bal"] or 0)
 
 
-def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMintUser", ref: str = "") -> bool:
-    clean_uid = (user_id or "user_1001").strip()[:64]
-    clean_name = (username or "TapMintUser").strip()[:64]
+def ensure_user_from_identity(conn: sqlite3.Connection, ident: dict, ref: str = "") -> bool:
+    clean_uid = (ident.get("user_id") or "user_1001").strip()[:64]
+    tg_id = (ident.get("telegram_id") or "").strip()[:32]
+    tg_handle = (ident.get("telegram_username") or "").strip()[:64]
+    is_tg_ver = 1 if ident.get("is_telegram_verified") else 0
+    clean_name = (ident.get("username") or "TapMintUser").strip()[:64]
     clean_ref = (ref or "").strip()[:64]
     ts = iso_now()
     day_key = now_utc().strftime("%Y-%m-%d")
@@ -323,12 +535,13 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
         conn.execute(
             """
             INSERT INTO users (
-                user_id, username, referred_by, is_master_ref, pts_balance,
+                user_id, telegram_id, telegram_username, is_telegram_verified,
+                username, referred_by, is_master_ref, pts_balance,
                 total_earned_pts, total_withdrawn_pts, ad_revenue_tier3_units,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
             """,
-            (clean_uid, clean_name, ref_val, is_master, ts, ts),
+            (clean_uid, tg_id, tg_handle, is_tg_ver, clean_name, ref_val, is_master, ts, ts),
         )
         if ref_val and ref_val != MASTER_REF:
             parent = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (ref_val,)).fetchone()
@@ -344,12 +557,23 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
                     (ref_val, bonus_pts, s_hash, ts),
                 )
     else:
-        conn.execute("UPDATE users SET username = ?, updated_at = ? WHERE user_id = ?", (clean_name, ts, clean_uid))
+        conn.execute(
+            """
+            UPDATE users
+            SET username = ?,
+                telegram_id = CASE WHEN ? != '' THEN ? ELSE telegram_id END,
+                telegram_username = CASE WHEN ? != '' THEN ? ELSE telegram_username END,
+                is_telegram_verified = CASE WHEN ? = 1 THEN 1 ELSE is_telegram_verified END,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (clean_name, tg_id, tg_id, tg_handle, tg_handle, is_tg_ver, ts, clean_uid),
+        )
 
     conn.execute(
         """
-        INSERT OR IGNORE INTO wallets (user_id, method, account_target, pin_hash, is_connected, updated_at)
-        VALUES (?, 'bKash', '', '', 0, ?)
+        INSERT OR IGNORE INTO wallets (user_id, method, account_target, pin_hash, is_connected, is_verified, verified_at, updated_at)
+        VALUES (?, 'bKash', '', '', 0, 0, '', ?)
         """,
         (clean_uid, ts),
     )
@@ -449,8 +673,10 @@ def credit_user_pts(conn: sqlite3.Connection, user_id: str, source_type: str, pt
 
 def mask_target(target: str) -> str:
     t = (target or "").strip()
+    if not t:
+        return "Not Set"
     if len(t) <= 6:
-        return t or "Not Set"
+        return t
     return f"{t[:3]}••••{t[-4:]}"
 
 
@@ -492,12 +718,16 @@ def build_bootstrap(conn: sqlite3.Connection, user_id: str) -> dict:
         "ok": True,
         "user": {
             "user_id": u["user_id"],
+            "telegram_id": u["telegram_id"] or "",
+            "telegram_username": u["telegram_username"] or "",
+            "is_telegram_verified": bool(u["is_telegram_verified"]),
             "username": u["username"],
             "pts_balance": int(u["pts_balance"]),
             "total_earned_pts": int(u["total_earned_pts"]),
         },
         "wallet": {
             "connected": bool(w["is_connected"]),
+            "verified": bool(w["is_verified"]),
             "method": w["method"],
             "masked_target": mask_target(w["account_target"]),
         },
@@ -554,19 +784,18 @@ def healthz():
 
 @app.route("/api/user/bootstrap")
 def api_bootstrap():
-    user_id = (request.args.get("user_id") or "user_1001").strip()
-    username = (request.args.get("username") or "TapMintUser").strip()
     ref = (request.args.get("ref") or "").strip()
+    ident = resolve_identity(request)
     conn = get_conn()
     try:
         settings = get_site_settings(conn)
         if int(settings.get("maintenance_mode", 0)) == 1:
             return jsonify({"ok": False, "error": "Site is under admin maintenance"}), 503
-        ok = ensure_user(conn, user_id, username, ref)
+        ok = ensure_user_from_identity(conn, ident, ref)
         if not ok:
             return jsonify({"ok": False, "error": "New user registration paused by admin"}), 403
         conn.commit()
-        return jsonify(build_bootstrap(conn, user_id))
+        return jsonify(build_bootstrap(conn, ident["user_id"]))
     finally:
         conn.close()
 
@@ -574,11 +803,11 @@ def api_bootstrap():
 @app.route("/api/spin", methods=["POST"])
 def api_spin():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
         sp = conn.execute("SELECT * FROM spin_state WHERE user_id = ?", (user_id,)).fetchone()
         if int(sp["spins_used_today"]) >= 1:
             return jsonify({"ok": False, "error": "Daily spin already used today"}), 400
@@ -633,8 +862,8 @@ def api_spin():
 @app.route("/api/task/open", methods=["POST"])
 def api_task_open():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     s_num = int(data.get("session_num") or 1)
     t_num = int(data.get("task_num") or 1)
     if s_num < 1 or s_num > 5 or t_num < 1 or t_num > 20:
@@ -642,7 +871,7 @@ def api_task_open():
 
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
         sessions = conn.execute(
             "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
             (user_id,),
@@ -686,14 +915,14 @@ def api_task_open():
 @app.route("/api/task/complete", methods=["POST"])
 def api_task_complete():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     s_num = int(data.get("session_num") or 1)
     t_num = int(data.get("task_num") or 1)
 
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
         settings = get_site_settings(conn)
         reward_pts = max(1, int(settings.get("task_reward_pts", DEFAULT_TASK_REWARD_PTS)))
         sessions = conn.execute(
@@ -769,11 +998,11 @@ def api_task_complete():
 @app.route("/api/mining/claim", methods=["POST"])
 def api_mining_claim():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
         m = conn.execute("SELECT * FROM mining_state WHERE user_id = ?", (user_id,)).fetchone()
         claims_today = int(m["claims_today"])
         if claims_today >= 6:
@@ -805,14 +1034,14 @@ def api_mining_claim():
 @app.route("/api/game/start", methods=["POST"])
 def api_game_start():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     game_name = (data.get("game_name") or "Tap Surge Combo").strip()[:64]
     ad_url = random.choice(ALL_AD_LINKS)
 
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
         settings = get_site_settings(conn)
         g_pts = max(1, int(settings.get("game_reward_pts", DEFAULT_GAME_REWARD_PTS)))
         token = uuid.uuid4().hex
@@ -840,7 +1069,8 @@ def api_game_start():
 @app.route("/api/game/ad-open", methods=["POST"])
 def api_game_ad_open():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     token = (data.get("session_token") or "").strip()
     conn = get_conn()
     try:
@@ -864,7 +1094,8 @@ def api_game_ad_open():
 @app.route("/api/game/ad-complete", methods=["POST"])
 def api_game_ad_complete():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     token = (data.get("session_token") or "").strip()
     conn = get_conn()
     try:
@@ -895,7 +1126,8 @@ def api_game_ad_complete():
 @app.route("/api/game/claim", methods=["POST"])
 def api_game_claim():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     token = (data.get("session_token") or "").strip()
     conn = get_conn()
     try:
@@ -930,32 +1162,49 @@ def api_game_claim():
 @app.route("/api/wallet/connect", methods=["POST"])
 def api_wallet_connect():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
-    username = (data.get("username") or "TapMintUser").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     method = (data.get("method") or "bKash").strip()
-    target = (data.get("account_target") or "").strip()
+    raw_target = (data.get("account_target") or "").strip()
     pin = (data.get("pin") or "").strip()
 
-    if method not in ("bKash", "Nagad", "Binance USDT"):
-        return jsonify({"ok": False, "error": "Unsupported payment method"}), 400
-    if len(target) < 6:
-        return jsonify({"ok": False, "error": "Enter a valid wallet number or address"}), 400
-    if not (len(pin) == 4 and pin.isdigit()):
-        return jsonify({"ok": False, "error": "PIN must be exactly 4 digits"}), 400
+    is_valid, err_msg, norm_target = validate_wallet_credentials(method, raw_target, pin)
+    if not is_valid:
+        return jsonify({"ok": False, "error": err_msg}), 400
 
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username)
+        ensure_user_from_identity(conn, ident)
+
+        dup = conn.execute(
+            """
+            SELECT user_id FROM wallets
+            WHERE LOWER(account_target) = LOWER(?) AND is_connected = 1 AND user_id != ?
+            """,
+            (norm_target, user_id),
+        ).fetchone()
+        if dup:
+            return jsonify({
+                "ok": False,
+                "error": "এই ওয়ালেট নম্বর/অ্যাড্রেসটি ইতিমধ্যে অন্য একটি অ্যাকাউন্টে ভেরিফায়েড আছে।"
+            }), 409
+
+        ts = iso_now()
         conn.execute(
             """
             UPDATE wallets
-            SET method = ?, account_target = ?, pin_hash = ?, is_connected = 1, updated_at = ?
+            SET method = ?, account_target = ?, pin_hash = ?, is_connected = 1, is_verified = 1, verified_at = ?, updated_at = ?
             WHERE user_id = ?
             """,
-            (method, target, hash_pin(pin), iso_now(), user_id),
+            (method, norm_target, hash_pin(pin), ts, ts, user_id),
         )
         conn.commit()
-        return jsonify({"ok": True, "method": method, "masked_target": mask_target(target)})
+        return jsonify({
+            "ok": True,
+            "verified": True,
+            "method": method,
+            "masked_target": mask_target(norm_target),
+        })
     finally:
         conn.close()
 
@@ -963,21 +1212,28 @@ def api_wallet_connect():
 @app.route("/api/withdraw/request", methods=["POST"])
 def api_withdraw_request():
     data = request.get_json(silent=True) or {}
-    user_id = (data.get("user_id") or "user_1001").strip()
+    ident = resolve_identity(request, data)
+    user_id = ident["user_id"]
     method = (data.get("method") or "bKash").strip()
     req_pts = int(data.get("requested_pts") or 0)
     pin = (data.get("pin") or "").strip()
 
     conn = get_conn()
     try:
-        ensure_user(conn, user_id)
+        ensure_user_from_identity(conn, ident)
         u = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         w = conn.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,)).fetchone()
 
-        if not w or int(w["is_connected"]) != 1 or not w["pin_hash"]:
-            return jsonify({"ok": False, "error": "Connect wallet and set 4-digit PIN first"}), 400
+        if not w or int(w["is_connected"]) != 1 or int(w["is_verified"]) != 1 or not w["pin_hash"]:
+            return jsonify({"ok": False, "error": "আগে বৈধ পেমেন্ট ওয়ালেট ও পিন ভেরিফাই করুন।"}), 400
         if not hmac.compare_digest(w["pin_hash"], hash_pin(pin)):
-            return jsonify({"ok": False, "error": "Invalid 4-digit PIN"}), 400
+            return jsonify({"ok": False, "error": "ভুল ৪-ডিজিট পিন! সঠিক পিন দিন।"}), 400
+
+        if method != w["method"]:
+            return jsonify({
+                "ok": False,
+                "error": f"আপনার ভেরিফায়েড ওয়ালেট মেথড হলো {w['method']}। {w['method']} নির্বাচন করুন।"
+            }), 400
 
         if method == "Binance USDT":
             min_req = BINANCE_MIN_WITHDRAW_PTS
@@ -1044,7 +1300,8 @@ def api_admin_overview():
 
         all_users = conn.execute(
             """
-            SELECT u.*, w.method AS wallet_method, w.account_target AS wallet_target, w.is_connected AS wallet_connected,
+            SELECT u.*, w.method AS wallet_method, w.account_target AS wallet_target,
+                   w.is_connected AS wallet_connected, w.is_verified AS wallet_verified,
                    (SELECT COUNT(*) FROM completed_tasks ct WHERE ct.user_id = u.user_id) AS tasks_done
             FROM users u
             LEFT JOIN wallets w ON w.user_id = u.user_id
@@ -1070,6 +1327,8 @@ def api_admin_overview():
 
             hardworking_users.append({
                 "user_id": u["user_id"],
+                "telegram_id": u["telegram_id"] or "",
+                "is_telegram_verified": bool(u["is_telegram_verified"]),
                 "username": u["username"],
                 "total_earned_pts": int(u["total_earned_pts"] or 0),
                 "pts_balance": int(u["pts_balance"] or 0),
@@ -1081,9 +1340,11 @@ def api_admin_overview():
             if int(u["wallet_connected"] or 0) == 1 and (u["wallet_target"] or "").strip():
                 saved_wallets.append({
                     "user_id": u["user_id"],
+                    "telegram_id": u["telegram_id"] or "",
                     "username": u["username"],
                     "method": u["wallet_method"],
                     "account_target": u["wallet_target"],
+                    "verified": bool(u["wallet_verified"]),
                     "pts_balance": int(u["pts_balance"] or 0),
                     "updated_at": u["updated_at"],
                 })
@@ -1340,6 +1601,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>TapMint</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   body {
@@ -1351,7 +1613,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .phone-frame { max-width: 430px; margin: 0 auto; padding: 10px 14px 20px; }
   .tg-top {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 4px 12px;
+    padding: 8px 4px 12px; gap: 8px;
   }
   .tg-brand { font-size: 19px; font-weight: 800; color: #f8fafc; display: flex; align-items: center; gap: 6px; }
   .tg-badge {
@@ -1359,7 +1621,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
     font-size: 11px; font-weight: 900; display: inline-flex; align-items: center; justify-content: center;
     box-shadow: 0 2px 8px rgba(56, 189, 248, 0.45);
   }
-  .tg-sub { font-size: 11px; color: #64748b; margin-top: 1px; }
+  .tg-sub { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+  .acct-pill {
+    font-size: 11px; font-weight: 700; color: #a7f3d0;
+    background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(52, 211, 153, 0.35);
+    padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  }
 
   .card-3d {
     background: linear-gradient(175deg, rgba(28, 48, 55, 0.96) 0%, rgba(15, 26, 31, 0.98) 55%, rgba(10, 18, 22, 0.99) 100%);
@@ -1869,12 +2136,25 @@ MINI_APP_HTML = """<!DOCTYPE html>
   <div class="tg-top">
     <div>
       <div class="tg-brand">TapMint <span class="tg-badge">✓</span></div>
-      <div class="tg-sub">bot</div>
+      <div class="tg-sub" id="acct-sub">Checking Telegram Account...</div>
     </div>
-    <div class="muted" style="font-weight:700;" id="hdr-pts">0 PTS</div>
+    <div style="text-align:right;">
+      <div class="acct-pill" id="acct-badge">Auto-Verified</div>
+      <div class="muted" style="font-weight:700;margin-top:3px;" id="hdr-pts">0 PTS</div>
+    </div>
   </div>
 
   <section class="page active" id="page-home">
+    <div class="card-3d" style="padding:11px 14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#ffffff;" id="prof-name">TapMint Account</div>
+          <div class="muted" style="font-size:11px;margin-top:2px;" id="prof-meta">Telegram ID: — • Account: —</div>
+        </div>
+        <div class="acct-pill" id="prof-ver-pill">✓ Verified</div>
+      </div>
+    </div>
+
     <div class="card-3d">
       <div class="bal-wrap">
         <div class="bal-left">
@@ -2101,20 +2381,23 @@ MINI_APP_HTML = """<!DOCTYPE html>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div>
           <div style="font-size:13px;font-weight:700;color:#34d399;" id="w-conn">Wallet Not Connected</div>
-          <div class="muted" style="font-size:11px;margin-top:2px;" id="w-ver">Connect wallet & set 4-digit PIN</div>
+          <div class="muted" style="font-size:11px;margin-top:2px;" id="w-ver">ভ্যালিড অ্যাকাউন্ট নম্বর/অ্যাড্রেস ও ৪-ডিজিট পিন দিয়ে ভেরিফাই করুন</div>
         </div>
-        <button class="pay-btn-3d" style="padding:7px 12px;" onclick="toggleWForm()">Change Wallet</button>
+        <button class="pay-btn-3d" style="padding:7px 12px;" onclick="toggleWForm()">Verify Wallet</button>
       </div>
       <div id="w-form" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148, 163, 184, 0.14);">
-        <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-bottom:4px;">Select Method to Save</div>
+        <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-bottom:4px;">Select Valid Payment Method</div>
         <div class="pay-3" style="margin:6px 0 10px;">
           <button type="button" class="pay-btn-3d active" id="wm-bKash" onclick="setPay('bKash')">bKash</button>
           <button type="button" class="pay-btn-3d" id="wm-Nagad" onclick="setPay('Nagad')">Nagad</button>
           <button type="button" class="pay-btn-3d" id="wm-Binance USDT" onclick="setPay('Binance USDT')">Binance USDT</button>
         </div>
-        <input class="inp" id="w-acc" placeholder="Enter bKash Number (e.g. 017XXXXXXXX)" />
-        <input class="inp" id="w-pin-set" type="password" maxlength="4" placeholder="Set 4-Digit PIN" />
-        <button class="btn-3d-green" onclick="saveW()">Save Wallet & PIN</button>
+        <input class="inp" id="w-acc" placeholder="017XXXXXXXX (১১ ডিজিট বৈধ নম্বর)" />
+        <input class="inp" id="w-pin-set" type="password" maxlength="4" inputmode="numeric" placeholder="Set Strong 4-Digit PIN (e.g. 5829)" />
+        <div class="muted" style="font-size:11px;margin-bottom:10px;" id="w-rule-hint">
+          • bKash/Nagad: ১১ ডিজিট (013–019) • সাধারণ পিন (0000, 1111, 1234) নিষিদ্ধ
+        </div>
+        <button class="btn-3d-green" onclick="saveW()">Verify & Save Wallet</button>
       </div>
     </div>
 
@@ -2126,7 +2409,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
         <div class="pin-box" id="p2">•</div>
         <div class="pin-box" id="p3">•</div>
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px;">ওয়ালেট কানেক্ট করার সময় সেট করা ৪ সংখ্যার পিন দিন।</div>
+      <div class="muted" style="font-size:11px;margin-top:6px;">ওয়ালেট ভেরিফাই করার সময় সেট করা ৪ সংখ্যার পিন দিন।</div>
       <input id="w-pin-confirm" type="password" maxlength="4" inputmode="numeric" oninput="paintPin()"
         style="opacity:0;position:absolute;pointer-events:none;height:1px;width:1px;" />
     </div>
@@ -2166,9 +2449,39 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
 <script>
 const qp = new URLSearchParams(window.location.search);
-const USER = qp.get("user_id") || "user_1001";
-const NAME = qp.get("username") || "TapMintUser";
-const REF = qp.get("ref") || "";
+const tgWebApp = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if (tgWebApp) {
+  try { tgWebApp.ready(); tgWebApp.expand(); } catch (_) {}
+}
+
+const TG_INIT_DATA = (tgWebApp && tgWebApp.initData) ? tgWebApp.initData : (qp.get("init_data") || "");
+const TG_USER_OBJ = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.user) ? tgWebApp.initDataUnsafe.user : null;
+
+const TG_ID = TG_USER_OBJ && TG_USER_OBJ.id
+  ? String(TG_USER_OBJ.id)
+  : (qp.get("tg_id") || "");
+
+const USER = TG_ID
+  ? `tg_${TG_ID}`
+  : (qp.get("user_id") || "user_1001");
+
+const NAME = TG_USER_OBJ && TG_USER_OBJ.id
+  ? (`${TG_USER_OBJ.first_name || ""} ${TG_USER_OBJ.last_name || ""}`.trim() || (TG_USER_OBJ.username ? `@${TG_USER_OBJ.username}` : `TG_${TG_ID}`))
+  : (qp.get("username") || (TG_ID ? `TG_${TG_ID}` : "TapMintUser"));
+
+const REF = (tgWebApp && tgWebApp.initDataUnsafe && tgWebApp.initDataUnsafe.start_param)
+  ? String(tgWebApp.initDataUnsafe.start_param)
+  : (qp.get("ref") || "");
+
+function authHeaders(extra = {}) {
+  const h = Object.assign({
+    "X-User-Id": USER,
+    "X-Username": NAME,
+  }, extra);
+  if (TG_ID) h["X-Telegram-Id"] = TG_ID;
+  if (TG_INIT_DATA) h["X-Telegram-Init-Data"] = TG_INIT_DATA;
+  return h;
+}
 
 const WHEEL_SLOTS = [
   { label: "1 PTS", color: "#16a34a" },
@@ -2226,7 +2539,7 @@ function notify(t) {
   el.textContent = t;
   el.style.display = "block";
   clearTimeout(window._nt);
-  window._nt = setTimeout(() => { el.style.display = "none"; }, 2800);
+  window._nt = setTimeout(() => { el.style.display = "none"; }, 3000);
 }
 
 function goPage(p) {
@@ -2260,11 +2573,14 @@ function setPay(m) {
     if (wm) wm.classList.toggle("active", k === m);
   });
   const accInp = document.getElementById("w-acc");
+  const ruleHint = document.getElementById("w-rule-hint");
   if (accInp) {
     if (m === "Binance USDT") {
-      accInp.placeholder = "Enter Binance Pay ID / USDT Address";
+      accInp.placeholder = "TRC20 (T...), BEP20 (0x...) বা Pay ID";
+      if (ruleHint) ruleHint.textContent = "• বৈধ TRC20/BEP20 অ্যাড্রেস বা ৬–১২ ডিজিট Pay ID • শক্তিশালী ৪ ডিজিট পিন";
     } else {
-      accInp.placeholder = `Enter ${m} Number (e.g. 017XXXXXXXX)`;
+      accInp.placeholder = `017XXXXXXXX (১১ ডিজিট বৈধ ${m} নম্বর)`;
+      if (ruleHint) ruleHint.textContent = `• ${m}: ১১ ডিজিট (013–019) • সাধারণ পিন (0000, 1111, 1234) নিষিদ্ধ`;
     }
   }
   syncWCopy();
@@ -2362,10 +2678,18 @@ function drawMiningUi() {
 
 function draw() {
   if (!ST) return;
-  const b = ST.user.pts_balance;
+  const u = ST.user;
+  const b = u.pts_balance;
   document.getElementById("hdr-pts").textContent = b.toLocaleString() + " PTS";
   document.getElementById("home-bal").textContent = b.toLocaleString() + " PTS";
   document.getElementById("w-bal").textContent = b.toLocaleString() + " PTS";
+
+  const tgLabel = u.telegram_id ? `TG ID: ${u.telegram_id}` : `Account: ${u.user_id}`;
+  document.getElementById("acct-sub").textContent = `${u.username} • ${tgLabel}`;
+  document.getElementById("acct-badge").textContent = u.is_telegram_verified ? "TG Auto-Verified" : "Personal Account";
+  document.getElementById("prof-name").textContent = u.username;
+  document.getElementById("prof-meta").textContent = `Telegram ID: ${u.telegram_id || "Web Session"} • Account ID: ${u.user_id}`;
+  document.getElementById("prof-ver-pill").textContent = u.is_telegram_verified ? "✓ TG Verified" : "● Active Account";
 
   drawDayTracker(ST.spin.spin_streak_days);
   drawSpinClock();
@@ -2390,12 +2714,13 @@ function draw() {
   document.getElementById("ref-cnt").textContent = ST.referral.total_referrals;
   document.getElementById("ref-act").textContent = actCount;
   document.getElementById("ref-pts").textContent = `+${boostPct}% Boost`;
-  document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(USER)}`;
+  const refParam = u.telegram_id ? `tg_${u.telegram_id}` : u.user_id;
+  document.getElementById("ref-url").value = `${window.location.origin}/?ref=${encodeURIComponent(refParam)}`;
 
   if (ST.wallet.connected) {
     document.getElementById("w-conn").textContent =
-      `Connected Wallet: ${ST.wallet.method} (${ST.wallet.masked_target})`;
-    document.getElementById("w-ver").textContent = "● Connected & Verified";
+      `Verified Wallet: ${ST.wallet.method} (${ST.wallet.masked_target})`;
+    document.getElementById("w-ver").textContent = "● Valid Method, Account & 4-Digit PIN Verified";
     setPay(ST.wallet.method);
   }
   syncWCopy();
@@ -2482,8 +2807,8 @@ async function startTask(sNum, tNum) {
   btn.disabled = true;
   const op = await fetch("/api/task/open", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME, session_num: sNum, task_num: tNum })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
   }).then(r => r.json());
   if (!op.ok) {
     notify(op.error || "Cannot open task");
@@ -2504,8 +2829,8 @@ async function startTask(sNum, tNum) {
       btn.textContent = "Claiming...";
       const cp = await fetch("/api/task/complete", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: USER, username: NAME, session_num: sNum, task_num: tNum })
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, session_num: sNum, task_num: tNum })
       }).then(r => r.json());
       if (cp.ok) {
         notify(`+${cp.pts_earned} PTS earned!`);
@@ -2522,8 +2847,8 @@ async function startTask(sNum, tNum) {
 async function doSpin() {
   const r = await fetch("/api/spin", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME })
   }).then(x => x.json());
   if (!r.ok) return notify(r.error || "Spin not ready");
 
@@ -2549,8 +2874,8 @@ async function doSpin() {
 async function doMining() {
   const r = await fetch("/api/mining/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME })
   }).then(x => x.json());
   if (r.ok) {
     notify(`+${r.pts_earned} PTS mined!`);
@@ -2627,8 +2952,8 @@ async function openPlayableGame(title) {
   const cfg = GAMES_CONFIG.find(x => x.title === title) || GAMES_CONFIG[0];
   const st = await fetch("/api/game/start", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, game_name: cfg.title, reward_pts: cfg.pts })
   }).then(x => x.json());
   if (!st.ok) return notify(st.error || "Cannot start game");
 
@@ -2874,8 +3199,8 @@ async function launchGameAdWindow() {
   GM.adOpenedAtMs = Date.now();
   await fetch("/api/game/ad-open", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
   });
   if (GM.adUrl) {
     window.open(GM.adUrl, "_blank", "noopener,noreferrer");
@@ -2886,8 +3211,8 @@ function relaunchGameAd() {
   GM.adOpenedAtMs = Date.now();
   fetch("/api/game/ad-open", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
   });
 }
 
@@ -2899,8 +3224,8 @@ document.addEventListener("visibilitychange", async () => {
       GM.adOpenedAtMs = Date.now();
       await fetch("/api/game/ad-open", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: USER, session_token: GM.token })
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
       });
     }
   } else if (GM.leftAdWindow) {
@@ -2908,8 +3233,8 @@ document.addEventListener("visibilitychange", async () => {
     if (spentSec >= 8) {
       const cp = await fetch("/api/game/ad-complete", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: USER, session_token: GM.token })
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
       }).then(x => x.json());
       if (cp.ok) {
         document.getElementById("gm-ad-timer").textContent = "৮–১০s সম্পন্ন ✓ ব্যাক এসেছেন, ক্লেম করুন!";
@@ -2948,8 +3273,8 @@ async function triggerGameAdStage() {
         verifiedSent = true;
         await fetch("/api/game/ad-complete", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: USER, session_token: GM.token })
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
         });
       }
       document.getElementById("gm-ad-timer").textContent = "8–10s Complete ✓ Ready to Claim!";
@@ -2968,8 +3293,8 @@ async function triggerGameAdStage() {
 async function claimGameReward() {
   const cl = await fetch("/api/game/claim", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, session_token: GM.token })
   }).then(x => x.json());
   if (cl.ok) {
     closeGameModal();
@@ -2993,18 +3318,46 @@ function shareTelegram() {
   window.open(shareUrl, "_blank", "noopener,noreferrer");
 }
 
+function clientValidateWallet(method, acc, pin) {
+  const weak = ["0000","1111","2222","3333","4444","5555","6666","7777","8888","9999","1234","4321","1122","2211","1212","2020","2024","2025","2026"];
+  if (!/^\d{4}$/.test(pin)) {
+    return "পিন অবশ্যই ৪ সংখ্যার হতে হবে।";
+  }
+  if (weak.includes(pin) || new Set(pin.split("")).size === 1) {
+    return "দুর্বল বা সাধারণ পিন (যেমন 0000, 1111, 1234) গ্রহণযোগ্য নয়।";
+  }
+  if (method === "bKash" || method === "Nagad") {
+    const clean = acc.replace(/[\s\-+]/g, "").replace(/^880/, "0");
+    if (!/^01[3-9]\d{8}$/.test(clean)) {
+      return `ভ্যালিড ১১ ডিজিটের ${method} নম্বর দিন (013–019)।`;
+    }
+  } else if (method === "Binance USDT") {
+    const okBep20 = /^0x[a-fA-F0-9]{40}$/.test(acc);
+    const okTrc20 = /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(acc);
+    const okPayId = /^\d{6,12}$/.test(acc);
+    if (!okBep20 && !okTrc20 && !okPayId) {
+      return "ভ্যালিড Binance USDT অ্যাড্রেস (TRC20/BEP20) বা Pay ID দিন।";
+    }
+  }
+  return "";
+}
+
 async function saveW() {
   const acc = document.getElementById("w-acc").value.trim();
   const pin = document.getElementById("w-pin-set").value.trim();
+  const localErr = clientValidateWallet(PAY, acc, pin);
+  if (localErr) {
+    return notify(localErr);
+  }
   const r = await fetch("/api/wallet/connect", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, username: NAME, method: PAY, account_target: acc, pin })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, username: NAME, method: PAY, account_target: acc, pin })
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("w-pin-set").value = "";
     document.getElementById("w-form").style.display = "none";
-    notify(`${r.method} wallet & 4-digit PIN saved`);
+    notify(`${r.method} ওয়ালেট ও পিন ভেরিফাই ও সেভ হয়েছে`);
     await loadApp();
   } else {
     notify(r.error || "Failed");
@@ -3014,6 +3367,9 @@ async function saveW() {
 async function reqWithdraw() {
   const val = parseInt(document.getElementById("w-pts-val").value || "0", 10);
   const pin = document.getElementById("w-pin-confirm").value.trim();
+  if (!/^\d{4}$/.test(pin)) {
+    return notify("আগে ৪ সংখ্যার পিন দিন");
+  }
   if (PAY === "Binance USDT" && val < 15000) {
     return notify("বাইনান্সে সর্বনিম্ন ১৫,০০০ PTS ($5) হলে উইথড্র পাবেন");
   }
@@ -3022,8 +3378,8 @@ async function reqWithdraw() {
   }
   const r = await fetch("/api/withdraw/request", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: USER, requested_pts: val, pin, method: PAY })
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: USER, tg_id: TG_ID, init_data: TG_INIT_DATA, requested_pts: val, pin, method: PAY })
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("w-pin-confirm").value = "";
@@ -3036,8 +3392,16 @@ async function reqWithdraw() {
 }
 
 async function loadApp() {
-  const q = new URLSearchParams({ user_id: USER, username: NAME, ref: REF });
-  const r = await fetch("/api/user/bootstrap?" + q.toString()).then(x => x.json());
+  const q = new URLSearchParams({
+    user_id: USER,
+    tg_id: TG_ID,
+    init_data: TG_INIT_DATA,
+    username: NAME,
+    ref: REF
+  });
+  const r = await fetch("/api/user/bootstrap?" + q.toString(), {
+    headers: authHeaders()
+  }).then(x => x.json());
   if (r.ok) {
     ST = r;
     draw();
@@ -3218,7 +3582,7 @@ ADMIN_3D_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel-3d">
-      <div class="sec-title"><span>Saved User Wallets</span></div>
+      <div class="sec-title"><span>Saved & Verified User Wallets</span></div>
       <div class="scroll-box" id="saved-wallets-list">
         <div style="font-size:12px;color:#94a3b8;">কোনো সেভ করা ওয়ালেট লোড হয়নি।</div>
       </div>
@@ -3267,7 +3631,7 @@ ADMIN_3D_HTML = """<!DOCTYPE html>
       <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.16);">
         <div style="font-size:13px;font-weight:800;margin-bottom:8px;">Manual User PTS Adjust</div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-          <input type="text" id="ub-uid" placeholder="user_id" style="margin-bottom:0;" />
+          <input type="text" id="ub-uid" placeholder="user_id or tg_12345" style="margin-bottom:0;" />
           <input type="number" id="ub-delta" placeholder="+100 or -50" style="margin-bottom:0;" />
         </div>
         <button class="btn-3d btn-b" style="width:100%;margin-top:8px;" onclick="adjustUserPts()">Apply PTS Change</button>
@@ -3362,11 +3726,12 @@ async function loadPanel(showAlertOnFail = false) {
   tuBox.innerHTML = "";
   for (let i = 0; i < (r.hardworking_users || []).length; i++) {
     const hu = r.hardworking_users[i];
+    const tgTag = hu.telegram_id ? ` • TG:${hu.telegram_id}` : "";
     const div = document.createElement("div");
     div.className = "item-row";
     div.innerHTML = `
       <div>
-        <strong>#${i + 1} ${hu.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${hu.user_id})</span>
+        <strong>#${i + 1} ${hu.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${hu.user_id}${tgTag})</span>
         ${hu.is_online ? `<span class="pill-on">● Active</span>` : `<span class="pill-off">Offline</span>`}<br/>
         <span style="font-size:12px;color:#cbd5e1;">Tasks Done: ${hu.tasks_done} • Bal: ${hu.pts_balance} PTS</span>
       </div>
@@ -3385,7 +3750,8 @@ async function loadPanel(showAlertOnFail = false) {
       div.className = "item-row";
       div.innerHTML = `
         <div>
-          <strong>${sw.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${sw.user_id})</span><br/>
+          <strong>${sw.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${sw.user_id})</span>
+          ${sw.verified ? `<span class="pill-on">✓ Verified</span>` : `<span class="pill-off">Unverified</span>`}<br/>
           <span style="font-size:12px;color:#34d399;font-weight:700;">${sw.method}:</span>
           <span style="font-size:12px;color:#ffffff;">${sw.account_target}</span>
         </div>
