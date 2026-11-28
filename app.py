@@ -21,8 +21,8 @@ BINANCE_PTS_PER_USD = 3000
 BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
-TASK_REWARD_PTS = 1
-GAME_REWARD_PTS = 2
+DEFAULT_TASK_REWARD_PTS = 1
+DEFAULT_GAME_REWARD_PTS = 2
 GAME_AD_MIN_WAIT_SEC = 8.0
 
 ADSTERRA_LINKS = [
@@ -107,6 +107,21 @@ def make_security_hash(user_id: str, action: str, amount: int, ts_iso: str) -> s
     return hmac.new(SECRET_SALT.encode("utf-8"), raw, hashlib.sha256).hexdigest()
 
 
+def categorize_source(source_type: str) -> str:
+    s = (source_type or "").lower()
+    if s.startswith("task_"):
+        return "task"
+    if s.startswith("game"):
+        return "game"
+    if s.startswith("mining"):
+        return "mining"
+    if s.startswith("spin"):
+        return "spin"
+    if "ref" in s:
+        return "refer"
+    return "other"
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
@@ -122,6 +137,17 @@ def init_db() -> None:
                 total_withdrawn_pts INTEGER NOT NULL DEFAULT 0,
                 ad_revenue_tier3_units INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS site_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                maintenance_mode INTEGER NOT NULL DEFAULT 0,
+                allow_new_users INTEGER NOT NULL DEFAULT 1,
+                task_reward_pts INTEGER NOT NULL DEFAULT 1,
+                game_reward_pts INTEGER NOT NULL DEFAULT 2,
+                referral_bonus_pts INTEGER NOT NULL DEFAULT 25,
+                announcement_text TEXT NOT NULL DEFAULT 'TapMint Live Forex & Rewards Hub Active',
                 updated_at TEXT NOT NULL
             );
 
@@ -230,6 +256,15 @@ def init_db() -> None:
             );
             """
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO site_settings (
+                id, maintenance_mode, allow_new_users, task_reward_pts,
+                game_reward_pts, referral_bonus_pts, announcement_text, updated_at
+            ) VALUES (1, 0, 1, ?, ?, 25, 'TapMint Live Rewards Hub Active', ?)
+            """,
+            (DEFAULT_TASK_REWARD_PTS, DEFAULT_GAME_REWARD_PTS, iso_now()),
+        )
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(spin_state)").fetchall()]
         if "spin_streak_days" not in cols:
             conn.execute("ALTER TABLE spin_state ADD COLUMN spin_streak_days INTEGER NOT NULL DEFAULT 0")
@@ -239,6 +274,20 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def get_site_settings(conn: sqlite3.Connection) -> dict:
+    row = conn.execute("SELECT * FROM site_settings WHERE id = 1").fetchone()
+    if not row:
+        return {
+            "maintenance_mode": 0,
+            "allow_new_users": 1,
+            "task_reward_pts": DEFAULT_TASK_REWARD_PTS,
+            "game_reward_pts": DEFAULT_GAME_REWARD_PTS,
+            "referral_bonus_pts": 25,
+            "announcement_text": "TapMint Live Rewards Hub Active",
+        }
+    return dict(row)
 
 
 def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
@@ -257,15 +306,18 @@ def get_reserve_balance_pts(conn: sqlite3.Connection) -> int:
     return int(row["bal"] or 0)
 
 
-def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMintUser", ref: str = "") -> None:
+def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMintUser", ref: str = "") -> bool:
     clean_uid = (user_id or "user_1001").strip()[:64]
     clean_name = (username or "TapMintUser").strip()[:64]
     clean_ref = (ref or "").strip()[:64]
     ts = iso_now()
     day_key = now_utc().strftime("%Y-%m-%d")
+    settings = get_site_settings(conn)
 
     existing = conn.execute("SELECT user_id, referred_by FROM users WHERE user_id = ?", (clean_uid,)).fetchone()
     if not existing:
+        if int(settings.get("allow_new_users", 1)) == 0:
+            return False
         is_master = 1 if clean_ref == MASTER_REF else 0
         ref_val = clean_ref if clean_ref and clean_ref != clean_uid else ""
         conn.execute(
@@ -281,7 +333,7 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
         if ref_val and ref_val != MASTER_REF:
             parent = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (ref_val,)).fetchone()
             if parent:
-                bonus_pts = 25
+                bonus_pts = max(1, int(settings.get("referral_bonus_pts", 25)))
                 s_hash = make_security_hash(ref_val, "referral_bonus", bonus_pts, ts)
                 conn.execute(
                     "UPDATE users SET pts_balance = pts_balance + ?, total_earned_pts = total_earned_pts + ?, updated_at = ? WHERE user_id = ?",
@@ -361,6 +413,7 @@ def ensure_user(conn: sqlite3.Connection, user_id: str, username: str = "TapMint
                 "DELETE FROM completed_tasks WHERE user_id = ? AND session_num = ?",
                 (clean_uid, int(sr["session_num"])),
             )
+    return True
 
 
 def get_unlocked_session(sessions_rows) -> int:
@@ -506,7 +559,12 @@ def api_bootstrap():
     ref = (request.args.get("ref") or "").strip()
     conn = get_conn()
     try:
-        ensure_user(conn, user_id, username, ref)
+        settings = get_site_settings(conn)
+        if int(settings.get("maintenance_mode", 0)) == 1:
+            return jsonify({"ok": False, "error": "Site is under admin maintenance"}), 503
+        ok = ensure_user(conn, user_id, username, ref)
+        if not ok:
+            return jsonify({"ok": False, "error": "New user registration paused by admin"}), 403
         conn.commit()
         return jsonify(build_bootstrap(conn, user_id))
     finally:
@@ -636,6 +694,8 @@ def api_task_complete():
     conn = get_conn()
     try:
         ensure_user(conn, user_id, username)
+        settings = get_site_settings(conn)
+        reward_pts = max(1, int(settings.get("task_reward_pts", DEFAULT_TASK_REWARD_PTS)))
         sessions = conn.execute(
             "SELECT session_num, completed_count, is_locked, locked_until FROM task_sessions WHERE user_id = ? ORDER BY session_num ASC",
             (user_id,),
@@ -679,7 +739,7 @@ def api_task_complete():
             (user_id, s_num),
         ).fetchone()["c"]
 
-        credit_user_pts(conn, user_id, f"task_s{s_num}_t{t_num}", TASK_REWARD_PTS, tier3_units=1)
+        credit_user_pts(conn, user_id, f"task_s{s_num}_t{t_num}", reward_pts, tier3_units=1)
 
         session_locked_now = False
         if new_cnt >= 20:
@@ -698,7 +758,7 @@ def api_task_complete():
         conn.commit()
         return jsonify({
             "ok": True,
-            "pts_earned": TASK_REWARD_PTS,
+            "pts_earned": reward_pts,
             "completed_in_session": int(new_cnt),
             "session_locked": session_locked_now,
         })
@@ -753,19 +813,21 @@ def api_game_start():
     conn = get_conn()
     try:
         ensure_user(conn, user_id, username)
+        settings = get_site_settings(conn)
+        g_pts = max(1, int(settings.get("game_reward_pts", DEFAULT_GAME_REWARD_PTS)))
         token = uuid.uuid4().hex
         conn.execute(
             """
             INSERT INTO game_sessions (session_token, user_id, game_name, reward_pts, started_at, ad_started_at, ad_verified, claimed)
             VALUES (?, ?, ?, ?, ?, '', 0, 0)
             """,
-            (token, user_id, game_name, GAME_REWARD_PTS, iso_now()),
+            (token, user_id, game_name, g_pts, iso_now()),
         )
         conn.commit()
         return jsonify({
             "ok": True,
             "session_token": token,
-            "reward_pts": GAME_REWARD_PTS,
+            "reward_pts": g_pts,
             "ad_required": True,
             "ad_url": ad_url,
             "wait_seconds_min": 8,
@@ -853,7 +915,7 @@ def api_game_claim():
             rem = max(1, int(GAME_AD_MIN_WAIT_SEC - elapsed + 0.99))
             return jsonify({"ok": False, "error": f"আরও {rem} সেকেন্ড অপেক্ষা করে ফিরে আসুন"}), 400
 
-        pts_earned = GAME_REWARD_PTS
+        pts_earned = int(row["reward_pts"] or DEFAULT_GAME_REWARD_PTS)
         conn.execute(
             "UPDATE game_sessions SET ad_verified = 1, ad_verified_at = ?, claimed = 1 WHERE session_token = ?",
             (iso_now(), token),
@@ -978,7 +1040,85 @@ def api_admin_overview():
     conn = get_conn()
     try:
         reserve_pts = get_reserve_balance_pts(conn)
-        user_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        settings = get_site_settings(conn)
+
+        all_users = conn.execute(
+            """
+            SELECT u.*, w.method AS wallet_method, w.account_target AS wallet_target, w.is_connected AS wallet_connected,
+                   (SELECT COUNT(*) FROM completed_tasks ct WHERE ct.user_id = u.user_id) AS tasks_done
+            FROM users u
+            LEFT JOIN wallets w ON w.user_id = u.user_id
+            ORDER BY u.total_earned_pts DESC, u.pts_balance DESC
+            """
+        ).fetchall()
+
+        total_users = len(all_users)
+        active_cutoff = now_utc() - timedelta(minutes=15)
+        active_users_count = 0
+        total_earned_pts_all = 0
+        total_circulating_pts = 0
+        hardworking_users = []
+        saved_wallets = []
+
+        for u in all_users:
+            upd_dt = parse_iso(u["updated_at"])
+            is_online = bool(upd_dt and upd_dt >= active_cutoff)
+            if is_online:
+                active_users_count += 1
+            total_earned_pts_all += int(u["total_earned_pts"] or 0)
+            total_circulating_pts += int(u["pts_balance"] or 0)
+
+            hardworking_users.append({
+                "user_id": u["user_id"],
+                "username": u["username"],
+                "total_earned_pts": int(u["total_earned_pts"] or 0),
+                "pts_balance": int(u["pts_balance"] or 0),
+                "tasks_done": int(u["tasks_done"] or 0),
+                "is_online": is_online,
+                "updated_at": u["updated_at"],
+            })
+
+            if int(u["wallet_connected"] or 0) == 1 and (u["wallet_target"] or "").strip():
+                saved_wallets.append({
+                    "user_id": u["user_id"],
+                    "username": u["username"],
+                    "method": u["wallet_method"],
+                    "account_target": u["wallet_target"],
+                    "pts_balance": int(u["pts_balance"] or 0),
+                    "updated_at": u["updated_at"],
+                })
+
+        offline_users_count = max(0, total_users - active_users_count)
+
+        source_totals = {"task": 0, "game": 0, "mining": 0, "spin": 0, "refer": 0, "other": 0}
+        log_rows = conn.execute(
+            "SELECT source_type, SUM(pts_delta) AS total_pts FROM earning_logs GROUP BY source_type"
+        ).fetchall()
+        for lr in log_rows:
+            cat = categorize_source(lr["source_type"])
+            source_totals[cat] = source_totals.get(cat, 0) + int(lr["total_pts"] or 0)
+
+        live_feed_rows = conn.execute(
+            """
+            SELECT el.id, el.user_id, COALESCE(u.username, el.user_id) AS username,
+                   el.source_type, el.pts_delta, el.created_at
+            FROM earning_logs el
+            LEFT JOIN users u ON u.user_id = el.user_id
+            ORDER BY el.id DESC LIMIT 40
+            """
+        ).fetchall()
+        live_earnings = []
+        for lf in live_feed_rows:
+            live_earnings.append({
+                "id": lf["id"],
+                "user_id": lf["user_id"],
+                "username": lf["username"],
+                "source_type": lf["source_type"],
+                "category": categorize_source(lf["source_type"]),
+                "pts_delta": int(lf["pts_delta"] or 0),
+                "created_at": lf["created_at"],
+            })
+
         master_ref_count = conn.execute("SELECT COUNT(*) AS c FROM users WHERE is_master_ref = 1").fetchone()["c"]
         tier3_units = conn.execute("SELECT COALESCE(SUM(ad_revenue_tier3_units), 0) AS s FROM users").fetchone()["s"]
         pending_w = conn.execute(
@@ -987,15 +1127,101 @@ def api_admin_overview():
         ledger = conn.execute(
             "SELECT * FROM note_khata ORDER BY id DESC LIMIT 100"
         ).fetchall()
+
+        base_host = request.host_url.rstrip("/")
+        master_affiliate_link = f"{base_host}/?ref={MASTER_REF}"
+
         return jsonify({
             "ok": True,
             "reserve_balance_pts": reserve_pts,
-            "total_users": int(user_count),
-            "master_affiliate_users": int(master_ref_count),
+            "total_users": total_users,
+            "active_users": active_users_count,
+            "offline_users": offline_users_count,
+            "total_earned_pts_all": total_earned_pts_all,
+            "total_circulating_pts": total_circulating_pts,
+            "source_totals": source_totals,
+            "live_earnings": live_earnings,
+            "hardworking_users": hardworking_users[:25],
+            "saved_wallets": saved_wallets,
+            "master_affiliate": {
+                "code": MASTER_REF,
+                "link": master_affiliate_link,
+                "users_count": int(master_ref_count),
+            },
+            "site_settings": settings,
             "tier3_ad_units": int(tier3_units),
             "pending_withdrawals": [dict(r) for r in pending_w],
             "note_khata": [dict(r) for r in ledger],
         })
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/site-control", methods=["POST"])
+def api_admin_site_control():
+    if not require_admin(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    conn = get_conn()
+    try:
+        cur = get_site_settings(conn)
+        maint = 1 if int(data.get("maintenance_mode", cur["maintenance_mode"])) else 0
+        allow_new = 1 if int(data.get("allow_new_users", cur["allow_new_users"])) else 0
+        t_pts = max(1, min(100, int(data.get("task_reward_pts", cur["task_reward_pts"]))))
+        g_pts = max(1, min(100, int(data.get("game_reward_pts", cur["game_reward_pts"]))))
+        r_pts = max(1, min(1000, int(data.get("referral_bonus_pts", cur["referral_bonus_pts"]))))
+        ann = str(data.get("announcement_text", cur["announcement_text"])).strip()[:200] or cur["announcement_text"]
+
+        conn.execute(
+            """
+            UPDATE site_settings
+            SET maintenance_mode = ?, allow_new_users = ?, task_reward_pts = ?,
+                game_reward_pts = ?, referral_bonus_pts = ?, announcement_text = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (maint, allow_new, t_pts, g_pts, r_pts, ann, iso_now()),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "site_settings": get_site_settings(conn)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/user-balance", methods=["POST"])
+def api_admin_user_balance():
+    if not require_admin(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    uid = (data.get("user_id") or "").strip()
+    delta = int(data.get("delta_pts") or 0)
+    if not uid or delta == 0:
+        return jsonify({"ok": False, "error": "Valid user_id and non-zero delta_pts required"}), 400
+
+    conn = get_conn()
+    try:
+        u = conn.execute("SELECT * FROM users WHERE user_id = ?", (uid,)).fetchone()
+        if not u:
+            return jsonify({"ok": False, "error": "User not found"}), 404
+        new_bal = max(0, int(u["pts_balance"]) + delta)
+        earned_add = max(0, delta)
+        ts = iso_now()
+        conn.execute(
+            """
+            UPDATE users
+            SET pts_balance = ?, total_earned_pts = total_earned_pts + ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (new_bal, earned_add, ts, uid),
+        )
+        conn.execute(
+            """
+            INSERT INTO earning_logs (user_id, source_type, pts_delta, ad_tier, security_hash, created_at)
+            VALUES (?, 'admin_adjust', ?, 'tier3', ?, ?)
+            """,
+            (uid, delta, make_security_hash(uid, "admin_adjust", delta, ts), ts),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "user_id": uid, "new_balance": new_bal})
     finally:
         conn.close()
 
@@ -1150,7 +1376,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
   .bal-wrap { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .bal-left { display: flex; align-items: center; gap: 12px; }
 
-  /* 3D Glossy PTS Coin */
   @keyframes coinShine {
     0%, 72% { transform: translateX(-165%) rotate(25deg); opacity: 0; }
     82% { opacity: 0.9; }
@@ -2816,6 +3041,8 @@ async function loadApp() {
   if (r.ok) {
     ST = r;
     draw();
+  } else if (r.error) {
+    notify(r.error);
   }
 }
 
@@ -2837,100 +3064,351 @@ ADMIN_3D_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>TapMint 3D Admin Panel</title>
+<title>Tapmint Admin panel</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   body {
-    background: radial-gradient(circle at 50% 0%, #162d34 0%, #091114 60%, #05090b 100%);
-    color: #f1f5f9; min-height: 100vh; padding: 16px;
+    background: radial-gradient(circle at 50% 0%, #1d3d46 0%, #0a1418 55%, #05090b 100%);
+    color: #f1f5f9; min-height: 100vh; padding: 14px 12px 48px;
   }
-  .wrap { max-width: 780px; margin: 0 auto; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  .hero-3d {
+    position: relative;
+    background: linear-gradient(165deg, rgba(35, 62, 72, 0.96) 0%, rgba(14, 26, 32, 0.98) 60%, rgba(8, 15, 19, 1) 100%);
+    border: 1.5px solid rgba(110, 231, 183, 0.35);
+    border-bottom: 5px solid #04090c;
+    border-radius: 24px;
+    padding: 20px 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 20px 42px rgba(0, 0, 0, 0.72), 0 0 28px rgba(52, 211, 153, 0.14), inset 0 2px 0 rgba(255, 255, 255, 0.16);
+    text-align: center;
+  }
+  .hero-title-3d {
+    font-size: clamp(26px, 6vw, 40px);
+    font-weight: 900;
+    letter-spacing: 0.4px;
+    background: linear-gradient(180deg, #ffffff 0%, #a7f3d0 55%, #34d399 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 6px 18px rgba(16, 185, 129, 0.25);
+    line-height: 1.15;
+  }
+  .hero-sub-3d {
+    font-size: 12px; color: #94a3b8; margin-top: 6px; font-weight: 600;
+  }
+
   .panel-3d {
-    background: linear-gradient(180deg, rgba(23, 38, 44, 0.95), rgba(12, 21, 25, 0.98));
-    border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 18px;
-    padding: 16px; margin-bottom: 14px;
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    background: linear-gradient(175deg, rgba(26, 44, 52, 0.96) 0%, rgba(12, 21, 26, 0.99) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 4px solid rgba(4, 9, 12, 0.95);
+    border-radius: 20px;
+    padding: 15px;
+    margin-bottom: 13px;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.1);
   }
-  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .sec-title { font-size: 16px; font-weight: 800; color: #ffffff; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+
+  .grid-stat { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; margin-bottom: 13px; }
   .stat-3d {
-    background: rgba(11, 20, 24, 0.92); border: 1px solid rgba(52, 211, 153, 0.22);
-    border-radius: 14px; padding: 12px;
+    background: linear-gradient(175deg, rgba(28, 48, 56, 0.95), rgba(10, 18, 22, 0.99));
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-bottom: 3px solid #04090c;
+    border-radius: 16px; padding: 12px;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.09);
   }
-  .stat-v { font-size: 22px; font-weight: 800; color: #34d399; margin-top: 4px; }
+  .stat-lbl { font-size: 11px; color: #94a3b8; font-weight: 700; }
+  .stat-v { font-size: 21px; font-weight: 900; color: #34d399; margin-top: 3px; }
+  .stat-v.gold { color: #facc15; }
+  .stat-v.sky { color: #38bdf8; }
+  .stat-v.rose { color: #fb7185; }
+
+  .src-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .src-box {
+    background: rgba(8, 15, 19, 0.92);
+    border: 1px solid rgba(52, 211, 153, 0.22);
+    border-radius: 13px; padding: 10px; text-align: center;
+  }
+  .src-name { font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase; }
+  .src-pts { font-size: 16px; font-weight: 900; color: #4ade80; margin-top: 3px; }
+
   input, select {
-    width: 100%; background: rgba(8, 15, 18, 0.94); border: 1px solid rgba(148, 163, 184, 0.24);
-    color: #fff; border-radius: 12px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px;
+    width: 100%; background: rgba(7, 13, 17, 0.95); border: 1px solid rgba(148, 163, 184, 0.24);
+    color: #fff; border-radius: 12px; padding: 10px 12px; font-size: 13px; margin-bottom: 9px;
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.6);
   }
-  .btn {
-    border: none; border-radius: 12px; padding: 10px 14px; font-weight: 800;
-    cursor: pointer; font-size: 13px;
+  .btn-3d {
+    border: none; border-radius: 13px; padding: 10px 14px; font-weight: 800;
+    cursor: pointer; font-size: 13px; transition: transform 0.08s ease;
   }
-  .btn-g { background: linear-gradient(180deg, #4ade80, #22c55e); color: #052e16; }
-  .btn-r { background: #ef4444; color: #fff; }
+  .btn-3d:active { transform: translateY(2px); }
+  .btn-g {
+    background: linear-gradient(180deg, #6ee7b7 0%, #34d399 65%, #10b981 100%);
+    color: #052e16; border-bottom: 3px solid #059669;
+  }
+  .btn-b {
+    background: linear-gradient(180deg, #38bdf8 0%, #0284c7 70%, #0369a1 100%);
+    color: #fff; border-bottom: 3px solid #075985;
+  }
+  .btn-r {
+    background: linear-gradient(180deg, #f87171 0%, #ef4444 75%, #b91c1c 100%);
+    color: #fff; border-bottom: 3px solid #7f1d1d;
+  }
+
   .item-row {
-    background: rgba(10, 18, 22, 0.9); border: 1px solid rgba(148, 163, 184, 0.14);
-    border-radius: 12px; padding: 10px 12px; margin-bottom: 8px;
+    background: rgba(8, 15, 19, 0.92);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 14px; padding: 10px 12px; margin-bottom: 8px;
     display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
   }
+  .pill-on {
+    display: inline-block; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 99px;
+    background: rgba(16, 185, 129, 0.2); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.45);
+  }
+  .pill-off {
+    display: inline-block; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 99px;
+    background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3);
+  }
+  .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 13px; }
+  .scroll-box { max-height: 310px; overflow-y: auto; padding-right: 2px; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="panel-3d">
-    <h2 style="font-size:20px;font-weight:800;">TapMint 3D Admin Panel • নোট খাতা</h2>
-    <p style="font-size:12px;color:#94a3b8;margin-top:4px;">Tier 3 Ad Revenue, Master Affiliate & নোট খাতা লেজার</p>
-    <div style="margin-top:12px;">
-      <input type="password" id="adm-key" placeholder="Enter TAPMINT_ADMIN_KEY" />
-      <button class="btn btn-g" onclick="loadPanel()">Load 3D Panel</button>
+  <div class="hero-3d">
+    <div class="hero-title-3d">Tapmint Admin panel</div>
+    <div class="hero-sub-3d">3D Command Center • Live Members, Source PTS, Hardworking Users, Wallets & Master Affiliate</div>
+    <div style="max-width:440px;margin:14px auto 0;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+      <input type="password" id="adm-key" placeholder="Enter TAPMINT_ADMIN_KEY" style="margin-bottom:0;flex:1;min-width:200px;" />
+      <button class="btn-3d btn-g" onclick="loadPanel(true)">Unlock & Live Sync</button>
     </div>
   </div>
 
-  <div class="grid-4">
-    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Reserve Ledger</div><div class="stat-v" id="st-res">0</div></div>
-    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Total Users</div><div class="stat-v" id="st-usr">0</div></div>
-    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Master Affiliate</div><div class="stat-v" id="st-mref">0</div></div>
-    <div class="stat-3d"><div style="font-size:11px;color:#94a3b8;">Tier 3 Ad Units</div><div class="stat-v" id="st-t3">0</div></div>
+  <div class="grid-stat">
+    <div class="stat-3d"><div class="stat-lbl">Total Members</div><div class="stat-v sky" id="st-total-u">0</div></div>
+    <div class="stat-3d"><div class="stat-lbl">Active Now (15m)</div><div class="stat-v" id="st-act-u">0</div></div>
+    <div class="stat-3d"><div class="stat-lbl">Offline Members</div><div class="stat-v rose" id="st-off-u">0</div></div>
+    <div class="stat-3d"><div class="stat-lbl">Total Earned PTS</div><div class="stat-v gold" id="st-earned-pts">0</div></div>
+    <div class="stat-3d"><div class="stat-lbl">Reserve Ledger PTS</div><div class="stat-v" id="st-res">0</div></div>
   </div>
 
   <div class="panel-3d">
-    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">Pending Withdrawals</h3>
-    <div id="w-list"></div>
+    <div class="sec-title">
+      <span>Live Source PTS Breakdown & Live Earning Feed</span>
+      <span style="font-size:11px;color:#34d399;" id="live-sync-badge">● Auto-Refresh 5s</span>
+    </div>
+    <div class="src-grid">
+      <div class="src-box"><div class="src-name">Task PTS</div><div class="src-pts" id="src-task">0</div></div>
+      <div class="src-box"><div class="src-name">Game PTS</div><div class="src-pts" id="src-game">0</div></div>
+      <div class="src-box"><div class="src-name">Mining PTS</div><div class="src-pts" id="src-mining">0</div></div>
+      <div class="src-box"><div class="src-name">Spin PTS</div><div class="src-pts" id="src-spin">0</div></div>
+      <div class="src-box"><div class="src-name">Refer PTS</div><div class="src-pts" id="src-refer">0</div></div>
+    </div>
+    <div class="scroll-box" id="live-earn-list">
+      <div style="font-size:12px;color:#94a3b8;">অ্যাডমিন কি দিয়ে আনলক করলে লাইভ আর্নিং দেখা যাবে।</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel-3d">
+      <div class="sec-title"><span>Most Hardworking Users (Top Earners)</span></div>
+      <div class="scroll-box" id="top-users-list">
+        <div style="font-size:12px;color:#94a3b8;">কোনো ইউজার ডেটা লোড হয়নি।</div>
+      </div>
+    </div>
+
+    <div class="panel-3d">
+      <div class="sec-title"><span>Saved User Wallets</span></div>
+      <div class="scroll-box" id="saved-wallets-list">
+        <div style="font-size:12px;color:#94a3b8;">কোনো সেভ করা ওয়ালেট লোড হয়নি।</div>
+      </div>
+    </div>
   </div>
 
   <div class="panel-3d">
-    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">নোট খাতা (Manual Entry)</h3>
-    <select id="nk-type">
-      <option value="tier3_ad_inflow">Tier 3 Ad Inflow</option>
-      <option value="withdraw_fee_inflow">Withdraw Fee Inflow</option>
-      <option value="withdraw_approved_outflow">Withdraw Approved Outflow</option>
-    </select>
-    <input type="number" id="nk-gross" placeholder="Gross PTS" value="0" />
-    <input type="number" id="nk-fee" placeholder="Fee PTS" value="0" />
-    <input type="number" id="nk-net" placeholder="Net PTS" value="0" />
-    <input type="text" id="nk-note" placeholder="নোট খাতার বিবরণ" />
-    <button class="btn btn-g" onclick="addKhata()">Save to নোট খাতা</button>
+    <div class="sec-title"><span>Master / Affiliate Referral Link</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <input type="text" id="master-ref-link" readonly style="margin-bottom:0;flex:1;min-width:220px;" placeholder="Master Affiliate Link" />
+      <button class="btn-3d btn-b" onclick="copyMasterRef()">Copy Master Link</button>
+    </div>
+    <div style="font-size:12px;color:#94a3b8;margin-top:8px;" id="master-ref-meta">Master Affiliate Users: 0</div>
   </div>
 
-  <div class="panel-3d">
-    <h3 style="font-size:16px;font-weight:800;margin-bottom:10px;">নোট খাতা লেজার লগ</h3>
-    <div id="nk-list"></div>
+  <div class="two-col">
+    <div class="panel-3d">
+      <div class="sec-title"><span>Full Site Control & Reward Settings</span></div>
+      <label style="font-size:11px;color:#94a3b8;">Maintenance Mode</label>
+      <select id="sc-maint">
+        <option value="0">Normal Live (0)</option>
+        <option value="1">Maintenance Locked (1)</option>
+      </select>
+      <label style="font-size:11px;color:#94a3b8;">New User Registration</label>
+      <select id="sc-newu">
+        <option value="1">Allow New Users (1)</option>
+        <option value="0">Pause New Signups (0)</option>
+      </select>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+        <div>
+          <label style="font-size:11px;color:#94a3b8;">Task PTS</label>
+          <input type="number" id="sc-tpts" value="1" />
+        </div>
+        <div>
+          <label style="font-size:11px;color:#94a3b8;">Game PTS</label>
+          <input type="number" id="sc-gpts" value="2" />
+        </div>
+        <div>
+          <label style="font-size:11px;color:#94a3b8;">Ref Bonus</label>
+          <input type="number" id="sc-rpts" value="25" />
+        </div>
+      </div>
+      <input type="text" id="sc-ann" placeholder="Site Notice / Announcement" />
+      <button class="btn-3d btn-g" style="width:100%;" onclick="saveSiteControl()">Save Site Control</button>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(148,163,184,0.16);">
+        <div style="font-size:13px;font-weight:800;margin-bottom:8px;">Manual User PTS Adjust</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <input type="text" id="ub-uid" placeholder="user_id" style="margin-bottom:0;" />
+          <input type="number" id="ub-delta" placeholder="+100 or -50" style="margin-bottom:0;" />
+        </div>
+        <button class="btn-3d btn-b" style="width:100%;margin-top:8px;" onclick="adjustUserPts()">Apply PTS Change</button>
+      </div>
+    </div>
+
+    <div class="panel-3d">
+      <div class="sec-title"><span>Pending Withdrawals</span></div>
+      <div class="scroll-box" id="w-list"></div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel-3d">
+      <div class="sec-title"><span>নোট খাতা (Manual Entry)</span></div>
+      <select id="nk-type">
+        <option value="tier3_ad_inflow">Tier 3 Ad Inflow</option>
+        <option value="withdraw_fee_inflow">Withdraw Fee Inflow</option>
+        <option value="withdraw_approved_outflow">Withdraw Approved Outflow</option>
+      </select>
+      <input type="number" id="nk-gross" placeholder="Gross PTS" value="0" />
+      <input type="number" id="nk-fee" placeholder="Fee PTS" value="0" />
+      <input type="number" id="nk-net" placeholder="Net PTS" value="0" />
+      <input type="text" id="nk-note" placeholder="নোট খাতার বিবরণ" />
+      <button class="btn-3d btn-g" style="width:100%;" onclick="addKhata()">Save to নোট খাতা</button>
+    </div>
+
+    <div class="panel-3d">
+      <div class="sec-title"><span>নোট খাতা লেজার লগ</span></div>
+      <div class="scroll-box" id="nk-list"></div>
+    </div>
   </div>
 </div>
 
 <script>
+let PANEL_UNLOCKED = false;
+
 function getKey() {
   return document.getElementById("adm-key").value.trim();
 }
 
-async function loadPanel() {
+async function loadPanel(showAlertOnFail = false) {
   const k = getKey();
+  if (!k) {
+    if (showAlertOnFail) alert("আগে TAPMINT_ADMIN_KEY দিন");
+    return;
+  }
   const r = await fetch("/api/admin/overview?admin_key=" + encodeURIComponent(k)).then(x => x.json());
-  if (!r.ok) return alert(r.error || "Unauthorized");
+  if (!r.ok) {
+    if (showAlertOnFail) alert(r.error || "Unauthorized");
+    return;
+  }
+  PANEL_UNLOCKED = true;
 
-  document.getElementById("st-res").textContent = r.reserve_balance_pts;
-  document.getElementById("st-usr").textContent = r.total_users;
-  document.getElementById("st-mref").textContent = r.master_affiliate_users;
-  document.getElementById("st-t3").textContent = r.tier3_ad_units;
+  document.getElementById("st-total-u").textContent = r.total_users;
+  document.getElementById("st-act-u").textContent = r.active_users;
+  document.getElementById("st-off-u").textContent = r.offline_users;
+  document.getElementById("st-earned-pts").textContent = Number(r.total_earned_pts_all || 0).toLocaleString();
+  document.getElementById("st-res").textContent = Number(r.reserve_balance_pts || 0).toLocaleString();
+
+  const st = r.source_totals || {};
+  document.getElementById("src-task").textContent = Number(st.task || 0).toLocaleString();
+  document.getElementById("src-game").textContent = Number(st.game || 0).toLocaleString();
+  document.getElementById("src-mining").textContent = Number(st.mining || 0).toLocaleString();
+  document.getElementById("src-spin").textContent = Number(st.spin || 0).toLocaleString();
+  document.getElementById("src-refer").textContent = Number(st.refer || 0).toLocaleString();
+
+  const leBox = document.getElementById("live-earn-list");
+  leBox.innerHTML = "";
+  if (!r.live_earnings || !r.live_earnings.length) {
+    leBox.innerHTML = `<div style="font-size:12px;color:#94a3b8;">এখনো কোনো লাইভ আর্নিং লগ নেই।</div>`;
+  } else {
+    for (const item of r.live_earnings) {
+      const div = document.createElement("div");
+      div.className = "item-row";
+      div.innerHTML = `
+        <div>
+          <strong>${item.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${item.user_id})</span><br/>
+          <span style="font-size:12px;color:#38bdf8;">[${item.category.toUpperCase()}]</span>
+          <span style="font-size:12px;color:#cbd5e1;">${item.source_type}</span>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:14px;font-weight:900;color:#4ade80;">+${item.pts_delta} PTS</div>
+          <div style="font-size:10px;color:#64748b;">${item.created_at}</div>
+        </div>
+      `;
+      leBox.appendChild(div);
+    }
+  }
+
+  const tuBox = document.getElementById("top-users-list");
+  tuBox.innerHTML = "";
+  for (let i = 0; i < (r.hardworking_users || []).length; i++) {
+    const hu = r.hardworking_users[i];
+    const div = document.createElement("div");
+    div.className = "item-row";
+    div.innerHTML = `
+      <div>
+        <strong>#${i + 1} ${hu.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${hu.user_id})</span>
+        ${hu.is_online ? `<span class="pill-on">● Active</span>` : `<span class="pill-off">Offline</span>`}<br/>
+        <span style="font-size:12px;color:#cbd5e1;">Tasks Done: ${hu.tasks_done} • Bal: ${hu.pts_balance} PTS</span>
+      </div>
+      <div style="font-size:14px;font-weight:900;color:#facc15;">${Number(hu.total_earned_pts).toLocaleString()} PTS</div>
+    `;
+    tuBox.appendChild(div);
+  }
+
+  const swBox = document.getElementById("saved-wallets-list");
+  swBox.innerHTML = "";
+  if (!r.saved_wallets || !r.saved_wallets.length) {
+    swBox.innerHTML = `<div style="font-size:12px;color:#94a3b8;">কোনো ইউজার এখনো ওয়ালেট সেভ করেনি।</div>`;
+  } else {
+    for (const sw of r.saved_wallets) {
+      const div = document.createElement("div");
+      div.className = "item-row";
+      div.innerHTML = `
+        <div>
+          <strong>${sw.username}</strong> <span style="font-size:11px;color:#94a3b8;">(${sw.user_id})</span><br/>
+          <span style="font-size:12px;color:#34d399;font-weight:700;">${sw.method}:</span>
+          <span style="font-size:12px;color:#ffffff;">${sw.account_target}</span>
+        </div>
+        <div style="font-size:12px;color:#cbd5e1;font-weight:700;">${Number(sw.pts_balance).toLocaleString()} PTS</div>
+      `;
+      swBox.appendChild(div);
+    }
+  }
+
+  if (r.master_affiliate) {
+    document.getElementById("master-ref-link").value = r.master_affiliate.link || "";
+    document.getElementById("master-ref-meta").textContent =
+      `Master Code: ${r.master_affiliate.code} • Master Affiliate Users: ${r.master_affiliate.users_count}`;
+  }
+
+  if (r.site_settings) {
+    document.getElementById("sc-maint").value = String(r.site_settings.maintenance_mode ?? 0);
+    document.getElementById("sc-newu").value = String(r.site_settings.allow_new_users ?? 1);
+    document.getElementById("sc-tpts").value = String(r.site_settings.task_reward_pts ?? 1);
+    document.getElementById("sc-gpts").value = String(r.site_settings.game_reward_pts ?? 2);
+    document.getElementById("sc-rpts").value = String(r.site_settings.referral_bonus_pts ?? 25);
+    document.getElementById("sc-ann").value = r.site_settings.announcement_text || "";
+  }
 
   const wl = document.getElementById("w-list");
   wl.innerHTML = "";
@@ -2946,8 +3424,8 @@ async function loadPanel() {
           <span style="font-size:12px;color:#94a3b8;">Req: ${w.requested_pts} | Fee: ${w.fee_pts} | Net: ${w.net_pts}</span>
         </div>
         <div style="display:flex;gap:8px;">
-          <button class="btn btn-g" onclick="reviewW(${w.id}, 'approve')">Approve</button>
-          <button class="btn btn-r" onclick="reviewW(${w.id}, 'reject')">Reject</button>
+          <button class="btn-3d btn-g" onclick="reviewW(${w.id}, 'approve')">Approve</button>
+          <button class="btn-3d btn-r" onclick="reviewW(${w.id}, 'reject')">Reject</button>
         </div>
       `;
       wl.appendChild(div);
@@ -2970,13 +3448,61 @@ async function loadPanel() {
   }
 }
 
+function copyMasterRef() {
+  const inp = document.getElementById("master-ref-link");
+  if (!inp.value) return alert("আগে প্যানেল আনলক করুন");
+  inp.select();
+  navigator.clipboard?.writeText(inp.value);
+  alert("Master Affiliate Link কপি হয়েছে");
+}
+
+async function saveSiteControl() {
+  const payload = {
+    maintenance_mode: parseInt(document.getElementById("sc-maint").value, 10),
+    allow_new_users: parseInt(document.getElementById("sc-newu").value, 10),
+    task_reward_pts: parseInt(document.getElementById("sc-tpts").value || "1", 10),
+    game_reward_pts: parseInt(document.getElementById("sc-gpts").value || "2", 10),
+    referral_bonus_pts: parseInt(document.getElementById("sc-rpts").value || "25", 10),
+    announcement_text: document.getElementById("sc-ann").value.trim()
+  };
+  const r = await fetch("/api/admin/site-control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": getKey() },
+    body: JSON.stringify(payload)
+  }).then(x => x.json());
+  if (r.ok) {
+    alert("Site Control সেভ হয়েছে");
+    loadPanel(false);
+  } else {
+    alert(r.error || "Failed");
+  }
+}
+
+async function adjustUserPts() {
+  const payload = {
+    user_id: document.getElementById("ub-uid").value.trim(),
+    delta_pts: parseInt(document.getElementById("ub-delta").value || "0", 10)
+  };
+  const r = await fetch("/api/admin/user-balance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": getKey() },
+    body: JSON.stringify(payload)
+  }).then(x => x.json());
+  if (r.ok) {
+    alert(`Updated ${r.user_id} balance -> ${r.new_balance} PTS`);
+    loadPanel(false);
+  } else {
+    alert(r.error || "Failed");
+  }
+}
+
 async function reviewW(wid, decision) {
   const r = await fetch("/api/admin/withdraw/review", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Admin-Key": getKey() },
     body: JSON.stringify({ withdraw_id: wid, decision })
   }).then(x => x.json());
-  if (r.ok) loadPanel();
+  if (r.ok) loadPanel(false);
   else alert(r.error || "Failed");
 }
 
@@ -2995,11 +3521,17 @@ async function addKhata() {
   }).then(x => x.json());
   if (r.ok) {
     document.getElementById("nk-note").value = "";
-    loadPanel();
+    loadPanel(false);
   } else {
     alert(r.error || "Failed");
   }
 }
+
+setInterval(() => {
+  if (PANEL_UNLOCKED && getKey()) {
+    loadPanel(false);
+  }
+}, 5000);
 </script>
 </body>
 </html>"""
