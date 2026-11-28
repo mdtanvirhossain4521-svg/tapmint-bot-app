@@ -22,7 +22,8 @@ BINANCE_MIN_USDT_EQUIVALENT = 5
 WITHDRAW_FEE_RATE = 0.05
 BINANCE_NETWORK_FEE_PTS = 50
 TASK_REWARD_PTS = 1
-GAME_REWARD_PTS = 3
+GAME_REWARD_PTS = 2
+GAME_AD_MIN_WAIT_SEC = 8.0
 
 ADSTERRA_LINKS = [
     "https://asiafilm.org/4/2da793d72cd322b49d8bb9d66fc974e7",
@@ -185,6 +186,7 @@ def init_db() -> None:
                 game_name TEXT NOT NULL,
                 reward_pts INTEGER NOT NULL,
                 started_at TEXT NOT NULL,
+                ad_started_at TEXT DEFAULT '',
                 ad_verified INTEGER NOT NULL DEFAULT 0,
                 ad_verified_at TEXT DEFAULT '',
                 claimed INTEGER NOT NULL DEFAULT 0
@@ -231,6 +233,9 @@ def init_db() -> None:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(spin_state)").fetchall()]
         if "spin_streak_days" not in cols:
             conn.execute("ALTER TABLE spin_state ADD COLUMN spin_streak_days INTEGER NOT NULL DEFAULT 0")
+        gcols = [r["name"] for r in conn.execute("PRAGMA table_info(game_sessions)").fetchall()]
+        if "ad_started_at" not in gcols:
+            conn.execute("ALTER TABLE game_sessions ADD COLUMN ad_started_at TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -751,8 +756,8 @@ def api_game_start():
         token = uuid.uuid4().hex
         conn.execute(
             """
-            INSERT INTO game_sessions (session_token, user_id, game_name, reward_pts, started_at, ad_verified, claimed)
-            VALUES (?, ?, ?, ?, ?, 0, 0)
+            INSERT INTO game_sessions (session_token, user_id, game_name, reward_pts, started_at, ad_started_at, ad_verified, claimed)
+            VALUES (?, ?, ?, ?, ?, '', 0, 0)
             """,
             (token, user_id, game_name, GAME_REWARD_PTS, iso_now()),
         )
@@ -763,7 +768,33 @@ def api_game_start():
             "reward_pts": GAME_REWARD_PTS,
             "ad_required": True,
             "ad_url": ad_url,
+            "wait_seconds_min": 8,
+            "wait_seconds_max": 10,
         })
+    finally:
+        conn.close()
+
+
+@app.route("/api/game/ad-open", methods=["POST"])
+def api_game_ad_open():
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "user_1001").strip()
+    token = (data.get("session_token") or "").strip()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM game_sessions WHERE session_token = ? AND user_id = ?",
+            (token, user_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Game session not found"}), 404
+        ad_start = row["ad_started_at"] or iso_now()
+        conn.execute(
+            "UPDATE game_sessions SET ad_started_at = ? WHERE session_token = ?",
+            (ad_start, token),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "ad_started_at": ad_start, "wait_seconds_min": 8, "wait_seconds_max": 10})
     finally:
         conn.close()
 
@@ -781,6 +812,14 @@ def api_game_ad_complete():
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Game session not found"}), 404
+        ad_start_dt = parse_iso(row["ad_started_at"])
+        if not ad_start_dt:
+            return jsonify({"ok": False, "error": "Ad not launched yet"}), 400
+        elapsed = (now_utc() - ad_start_dt).total_seconds()
+        if elapsed < GAME_AD_MIN_WAIT_SEC:
+            rem = max(1, int(GAME_AD_MIN_WAIT_SEC - elapsed + 0.99))
+            return jsonify({"ok": False, "error": f"অ্যাডে ৮-১০ সেকেন্ড অপেক্ষা করুন ({rem}s বাকি)"}), 400
+
         conn.execute(
             "UPDATE game_sessions SET ad_verified = 1, ad_verified_at = ? WHERE session_token = ?",
             (iso_now(), token),
@@ -806,11 +845,19 @@ def api_game_claim():
             return jsonify({"ok": False, "error": "Game session not found"}), 404
         if int(row["claimed"]) == 1:
             return jsonify({"ok": False, "error": "Reward already claimed"}), 400
-        if int(row["ad_verified"]) != 1:
-            return jsonify({"ok": False, "error": "Mandatory ad verification incomplete"}), 400
+        ad_start_dt = parse_iso(row["ad_started_at"])
+        if not ad_start_dt:
+            return jsonify({"ok": False, "error": "আগে অ্যাড খুলুন ও ৮-১০ সেকেন্ড অপেক্ষা করুন"}), 400
+        elapsed = (now_utc() - ad_start_dt).total_seconds()
+        if elapsed < GAME_AD_MIN_WAIT_SEC:
+            rem = max(1, int(GAME_AD_MIN_WAIT_SEC - elapsed + 0.99))
+            return jsonify({"ok": False, "error": f"আরও {rem} সেকেন্ড অপেক্ষা করে ফিরে আসুন"}), 400
 
         pts_earned = GAME_REWARD_PTS
-        conn.execute("UPDATE game_sessions SET claimed = 1 WHERE session_token = ?", (token,))
+        conn.execute(
+            "UPDATE game_sessions SET ad_verified = 1, ad_verified_at = ?, claimed = 1 WHERE session_token = ?",
+            (iso_now(), token),
+        )
         credit_user_pts(conn, user_id, f"game:{row['game_name']}", pts_earned, tier3_units=1)
         conn.commit()
         return jsonify({"ok": True, "pts_earned": pts_earned})
@@ -1418,7 +1465,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
 
   .modal-bg {
     position: fixed; inset: 0; z-index: 80;
-    background: rgba(3, 8, 11, 0.9); backdrop-filter: blur(8px);
+    background: rgba(3, 8, 11, 0.92); backdrop-filter: blur(8px);
     display: none; align-items: center; justify-content: center; padding: 14px;
   }
   .modal-bg.open { display: flex; }
@@ -1430,9 +1477,9 @@ MINI_APP_HTML = """<!DOCTYPE html>
     box-shadow: 0 20px 44px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.14);
   }
   .game-arena-box {
-    position: relative; width: 100%; height: 230px; border-radius: 15px;
+    position: relative; width: 100%; height: 240px; border-radius: 15px;
     background: radial-gradient(circle at 50% 35%, #16323b 0%, #081216 100%);
-    border: 1px solid rgba(52, 211, 153, 0.3); overflow: hidden;
+    border: 1px solid rgba(52, 211, 153, 0.32); overflow: hidden;
     margin: 10px 0 12px; user-select: none; touch-action: manipulation;
   }
 
@@ -1464,7 +1511,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
     box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
   }
 
-  /* ১ নং ছবির মতো বটম নেভিগেশন বাটন স্টাইল */
   .bnav {
     position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
     background: linear-gradient(180deg, rgba(16, 26, 33, 0.97) 0%, rgba(9, 15, 20, 0.99) 100%);
@@ -1506,10 +1552,6 @@ MINI_APP_HTML = """<!DOCTYPE html>
       0 10px 20px rgba(16, 185, 129, 0.45),
       inset 0 1.5px 0 rgba(255, 255, 255, 0.75);
   }
-  .bnav-item.active span {
-    color: #064e3b;
-    filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.35));
-  }
   .toast {
     position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 95;
     background: #132a30; border: 1px solid #34d399; color: #ecfdf5;
@@ -1525,7 +1567,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-size:17px;font-weight:800;" id="gm-title">Game</div>
-        <div style="font-size:12px;color:#34d399;font-weight:700;" id="gm-target">Target: 50+ • Reward: +3 PTS</div>
+        <div style="font-size:12px;color:#34d399;font-weight:700;" id="gm-target">Target: 75+ • Reward: +2 PTS</div>
       </div>
       <button class="pay-btn-3d" style="padding:6px 10px;" onclick="closeGameModal()">✕</button>
     </div>
@@ -1533,7 +1575,7 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div id="gm-play-stage">
       <div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;margin-top:8px;">
         <span id="gm-score-lbl">Score: 0</span>
-        <span id="gm-time-lbl">Time: 18s</span>
+        <span id="gm-time-lbl">Time: 16s</span>
       </div>
       <div class="game-arena-box" id="gm-arena"></div>
       <div id="gm-ctrl-bar" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px;"></div>
@@ -1541,17 +1583,18 @@ MINI_APP_HTML = """<!DOCTYPE html>
     </div>
 
     <div id="gm-ad-stage" style="display:none;text-align:center;padding:8px 0;">
-      <div style="font-size:12px;font-weight:800;color:#fbbf24;letter-spacing:0.6px;">SPONSORED AD REQUIRED</div>
-      <div style="font-size:16px;font-weight:800;margin-top:4px;">টার্গেট সম্পন্ন হয়েছে! +3 PTS নিতে অ্যাড দেখুন</div>
-      <div style="background:rgba(8,15,19,0.9);border:1px solid rgba(52,211,153,0.35);border-radius:14px;padding:14px;margin:12px 0;">
-        <div style="font-size:13px;color:#cbd5e1;margin-bottom:8px;">বিজ্ঞাপন লিংক খুলে দেখুন অথবা নিচের কাউন্টডাউন শেষ করুন:</div>
-        <a id="gm-ad-link" href="#" target="_blank" rel="noopener noreferrer"
-           style="display:inline-block;background:rgba(56,189,248,0.18);border:1px solid #38bdf8;color:#7dd3fc;padding:7px 12px;border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;">
-          🔗 Open Ad Sponsor Link
+      <div style="font-size:12px;font-weight:800;color:#fbbf24;letter-spacing:0.6px;">AUTO AD LAUNCHED • 8–10s WAIT</div>
+      <div style="font-size:16px;font-weight:800;margin-top:4px;">টার্গেট সম্পন্ন! অ্যাড খুলেছে — ৮–১০ সেকেন্ড অপেক্ষা করে ফিরে আসুন</div>
+      <div style="background:rgba(8,15,19,0.92);border:1px solid rgba(52,211,153,0.38);border-radius:14px;padding:14px;margin:12px 0;">
+        <div style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">অ্যাড পপআপ ব্লক হলে নিচের বাটনে চাপুন:</div>
+        <a id="gm-ad-link" href="#" target="_blank" rel="noopener noreferrer" onclick="relaunchGameAd()"
+           style="display:inline-block;background:rgba(56,189,248,0.2);border:1px solid #38bdf8;color:#7dd3fc;padding:8px 13px;border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;">
+          🔗 Open Ad Link Again
         </a>
-        <div style="font-size:20px;font-weight:900;color:#4ade80;margin-top:10px;" id="gm-ad-timer">Ad Verifying: 5s</div>
+        <div style="font-size:21px;font-weight:900;color:#4ade80;margin-top:10px;" id="gm-ad-timer">Wait: 9s</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px;" id="gm-ad-hint">অ্যাড থেকে ব্যাক আসলে রিওয়ার্ড ক্লেম করতে পারবেন</div>
       </div>
-      <button class="btn-3d-green" id="gm-claim-btn" disabled onclick="claimGameReward()">Claim +3 PTS</button>
+      <button class="btn-3d-green" id="gm-claim-btn" disabled onclick="claimGameReward()">Claim +2 PTS</button>
     </div>
   </div>
 </div>
@@ -1711,12 +1754,12 @@ MINI_APP_HTML = """<!DOCTYPE html>
     <div style="text-align:center;margin-bottom:14px;">
       <div style="font-size:20px;font-weight:800;">Games Arena</div>
       <div class="muted" style="margin-top:3px;">
-        গেম খেলে পয়েন্ট ক্লেম করুন (অবশ্যই খেলার পর পয়েন্ট পাওয়ার জন্য অ্যাড দেখতে হবে)
+        হার্ড গেম চ্যালেঞ্জ শেষ করলে অটোমেটিক অ্যাড খুলবে • ৮–১০ সেকেন্ড পর ফিরে এলে +2 PTS
       </div>
     </div>
     <div id="game-rows"></div>
     <div class="g-notice-warm">
-      🎮 প্রতিটি গেম শেষ করার পর পয়েন্ট পেতে অ্যাড দেখা বাধ্যতামূলক
+      🎮 টার্গেট পূরণ হলে অটোমেটিক অ্যাড ওপেন হবে; ৮–১০ সেকেন্ড অপেক্ষা করে ব্যাক আসলে রিওয়ার্ড সাকসেস হবে
     </div>
   </section>
 
@@ -2242,10 +2285,10 @@ async function doMining() {
 }
 
 const GAMES_CONFIG = [
-  { ico: "🕹", title: "Tap Surge Combo", tgtText: "Score Target: 50+", targetVal: 50, pts: 3, mode: "tap" },
-  { ico: "👾", title: "Catch & Dodge 3D", tgtText: "Score Target: 20+", targetVal: 20, pts: 3, mode: "catch" },
-  { ico: "🔢", title: "Number Merge 2048", tgtText: "Target: 512+ Tile", targetVal: 60, pts: 3, mode: "merge" },
-  { ico: "🐍", title: "Neon Snake Arcade", tgtText: "Score Target: 30+", targetVal: 30, pts: 3, mode: "snake" },
+  { ico: "🕹", title: "Tap Surge Combo", tgtText: "Hard Target: 75+", targetVal: 75, timeSec: 16, pts: 2, mode: "tap" },
+  { ico: "👾", title: "Catch & Dodge 3D", tgtText: "Hard Target: 35+", targetVal: 35, timeSec: 18, pts: 2, mode: "catch" },
+  { ico: "🔢", title: "Number Merge 2048", tgtText: "Hard Target: 90+ Pts", targetVal: 90, timeSec: 22, pts: 2, mode: "merge" },
+  { ico: "🐍", title: "Neon Snake Arcade", tgtText: "Hard Target: 40+", targetVal: 40, timeSec: 20, pts: 2, mode: "snake" },
 ];
 
 function drawGames() {
@@ -2260,11 +2303,11 @@ function drawGames() {
         <div>
           <div style="font-weight:800;font-size:15px;color:#ffffff;">${g.title}</div>
           <div class="muted" style="margin-top:2px;">${g.tgtText}</div>
-          <div style="font-size:12px;color:#34d399;font-weight:700;margin-top:2px;">Reward: +${g.pts} PTS (Ad Required)</div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px;">বিজ্ঞাপন দেখার পর পয়েন্ট অ্যাকাউন্টে যোগ হবে</div>
+          <div style="font-size:12px;color:#34d399;font-weight:700;margin-top:2px;">Reward: +${g.pts} PTS (Auto Ad 8–10s)</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;">ক্লেমে অটো অ্যাড খুলবে • ৮–১০s পর ব্যাক আসলে সাকসেস</div>
         </div>
       </div>
-      <button class="g-play-3d" onclick="openPlayableGame('${g.title}')">Play Fullscreen</button>
+      <button class="g-play-3d" onclick="openPlayableGame('${g.title}')">Play Hard</button>
     `;
     box.appendChild(el);
   }
@@ -2273,22 +2316,30 @@ function drawGames() {
 let GM = {
   cfg: null,
   token: "",
+  adUrl: "",
   score: 0,
-  timeLeft: 18,
+  timeLeft: 16,
   timerIv: null,
   spawnIv: null,
+  adTimerIv: null,
+  adOpenedAtMs: 0,
+  leftAdWindow: false,
   finished: false,
-  catcherX: 140,
-  snake: [{ x: 6, y: 4 }],
+  catcherX: 135,
+  mergePair: [16, 16],
+  snake: [{ x: 5, y: 4 }],
   snakeDir: { x: 1, y: 0 },
-  food: { x: 10, y: 4 },
+  food: { x: 11, y: 4 },
+  hazard: { x: 8, y: 2 },
 };
 
 function clearGameTimers() {
   if (GM.timerIv) clearInterval(GM.timerIv);
   if (GM.spawnIv) clearInterval(GM.spawnIv);
+  if (GM.adTimerIv) clearInterval(GM.adTimerIv);
   GM.timerIv = null;
   GM.spawnIv = null;
+  GM.adTimerIv = null;
 }
 
 function closeGameModal() {
@@ -2308,13 +2359,16 @@ async function openPlayableGame(title) {
   clearGameTimers();
   GM.cfg = cfg;
   GM.token = st.session_token;
+  GM.adUrl = st.ad_url || "";
   GM.score = 0;
-  GM.timeLeft = 18;
+  GM.timeLeft = cfg.timeSec || 16;
   GM.finished = false;
+  GM.adOpenedAtMs = 0;
+  GM.leftAdWindow = false;
 
   document.getElementById("gm-title").textContent = cfg.title;
   document.getElementById("gm-target").textContent = `${cfg.tgtText} • Reward: +${cfg.pts} PTS`;
-  document.getElementById("gm-ad-link").href = st.ad_url || "#";
+  document.getElementById("gm-ad-link").href = GM.adUrl || "#";
   document.getElementById("gm-play-stage").style.display = "block";
   document.getElementById("gm-ad-stage").style.display = "none";
   document.getElementById("game-modal").classList.add("open");
@@ -2341,73 +2395,92 @@ function initGameMode() {
 
   if (GM.cfg.mode === "tap") {
     arena.innerHTML = `
-      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;">
-        <button id="tap-3d-target" style="width:126px;height:126px;border-radius:50%;border:3px solid #86efac;border-bottom:6px solid #15803d;background:radial-gradient(circle at 30% 25%,#4ade80,#16a34a);color:#052e16;font-weight:900;font-size:18px;cursor:pointer;box-shadow:0 12px 24px rgba(34,197,94,0.4);">
-          TAP +5
+      <div style="position:relative;width:100%;height:100%;">
+        <button id="tap-moving-good" style="position:absolute;top:60px;left:95px;width:72px;height:72px;border-radius:50%;border:2.5px solid #bbf7d0;border-bottom:4px solid #15803d;background:radial-gradient(circle at 30% 25%,#4ade80,#15803d);color:#052e16;font-weight:900;font-size:13px;cursor:pointer;box-shadow:0 8px 18px rgba(34,197,94,0.45);transition:top 0.14s,left 0.14s;">
+          +8
         </button>
-        <div class="muted" style="margin-top:10px;">দ্রুত ট্যাপ করে ${GM.cfg.targetVal}+ স্কোর করুন</div>
+        <button id="tap-moving-bad" style="position:absolute;top:135px;left:185px;width:62px;height:62px;border-radius:50%;border:2px solid #fca5a5;border-bottom:4px solid #991b1b;background:radial-gradient(circle at 30% 25%,#f87171,#dc2626);color:#fff;font-weight:900;font-size:12px;cursor:pointer;transition:top 0.16s,left 0.16s;">
+          -10
+        </button>
+        <div style="position:absolute;bottom:8px;left:0;right:0;text-align:center;font-size:11px;color:#94a3b8;">
+          সবুজ টার্গেট ধরুন (+8), লাল বোম/ট্র্যাপ এড়িয়ে চলুন (-10)
+        </div>
       </div>
     `;
-    document.getElementById("tap-3d-target").onclick = () => {
+    const gBtn = document.getElementById("tap-moving-good");
+    const bBtn = document.getElementById("tap-moving-bad");
+
+    const moveTargets = () => {
       if (GM.finished) return;
-      GM.score += 5;
+      gBtn.style.left = Math.floor(Math.random() * 250) + 12 + "px";
+      gBtn.style.top = Math.floor(Math.random() * 125) + 12 + "px";
+      bBtn.style.left = Math.floor(Math.random() * 255) + 14 + "px";
+      bBtn.style.top = Math.floor(Math.random() * 130) + 14 + "px";
+    };
+
+    gBtn.onclick = () => {
+      if (GM.finished) return;
+      GM.score += 8;
       updateGmHud();
+      moveTargets();
       if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
     };
+    bBtn.onclick = () => {
+      if (GM.finished) return;
+      GM.score = Math.max(0, GM.score - 10);
+      updateGmHud();
+      moveTargets();
+    };
+    GM.spawnIv = setInterval(moveTargets, 620);
   } else if (GM.cfg.mode === "catch") {
-    GM.catcherX = 125;
+    GM.catcherX = 135;
     arena.innerHTML = `
-      <div id="catcher-p" style="position:absolute;bottom:10px;left:${GM.catcherX}px;width:54px;height:24px;border-radius:10px;background:linear-gradient(180deg,#4ade80,#15803d);border:1px solid #bbf7d0;display:flex;align-items:center;justify-content:center;font-weight:900;color:#052e16;font-size:12px;">🧺</div>
+      <div id="catcher-p" style="position:absolute;bottom:10px;left:${GM.catcherX}px;width:50px;height:24px;border-radius:10px;background:linear-gradient(180deg,#6ee7b7,#10b981);border:1px solid #a7f3d0;display:flex;align-items:center;justify-content:center;font-weight:900;color:#052e16;font-size:13px;">🧺</div>
     `;
     ctrl.innerHTML = `
-      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(-38)">⬅ Left</button>
-      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(38)">Right ➡</button>
+      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(-42)">⬅ Left</button>
+      <button class="pay-btn-3d" style="grid-column:span 2;" onclick="moveCatcher(42)">Right ➡</button>
     `;
     GM.spawnIv = setInterval(() => {
       if (GM.finished) return;
       const drop = document.createElement("div");
-      const isBomb = Math.random() < 0.24;
-      let dx = Math.floor(Math.random() * 270) + 12;
+      const rVal = Math.random();
+      const isBomb = rVal < 0.36;
+      const isGem = rVal >= 0.82;
+      let dx = Math.floor(Math.random() * 275) + 12;
       let dy = 8;
-      drop.textContent = isBomb ? "💣" : "🪙";
+      drop.textContent = isBomb ? "💣" : (isGem ? "💎" : "🪙");
       drop.style.cssText = `position:absolute;top:${dy}px;left:${dx}px;font-size:22px;`;
       arena.appendChild(drop);
 
       const fallIv = setInterval(() => {
         if (GM.finished) { clearInterval(fallIv); return; }
-        dy += 14;
+        dy += 18;
         drop.style.top = dy + "px";
-        if (dy >= 175 && dy <= 212 && Math.abs(dx - GM.catcherX) < 34) {
+        if (dy >= 182 && dy <= 220 && Math.abs(dx - GM.catcherX) < 32) {
           clearInterval(fallIv);
           drop.remove();
           if (isBomb) {
-            GM.score = Math.max(0, GM.score - 5);
+            GM.score = Math.max(0, GM.score - 8);
           } else {
-            GM.score += 5;
+            GM.score += (isGem ? 12 : 7);
           }
           updateGmHud();
           if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
-        } else if (dy > 225) {
+        } else if (dy > 232) {
           clearInterval(fallIv);
           drop.remove();
         }
-      }, 90);
-    }, 680);
+      }, 85);
+    }, 520);
   } else if (GM.cfg.mode === "merge") {
-    arena.innerHTML = `
-      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
-        <div style="display:flex;gap:10px;">
-          <button class="open-btn-3d" onclick="mergeTile(12)">[ 12 ]</button>
-          <button class="open-btn-3d" onclick="mergeTile(12)">[ 12 ]</button>
-          <button class="open-btn-3d" onclick="mergeTile(15)">[ 15 ]</button>
-        </div>
-        <div class="muted">একই মানের টাইল মিলিয়ে ${GM.cfg.targetVal}+ স্কোর করুন</div>
-      </div>
-    `;
+    GM.mergePair = [16, 16];
+    renderMergeBoard(arena);
   } else if (GM.cfg.mode === "snake") {
     GM.snake = [{ x: 5, y: 4 }];
     GM.snakeDir = { x: 1, y: 0 };
     GM.food = { x: 11, y: 4 };
+    GM.hazard = { x: 8, y: 4 };
     ctrl.innerHTML = `
       <button class="pay-btn-3d" onclick="setSnakeDir(0,-1)">▲</button>
       <button class="pay-btn-3d" onclick="setSnakeDir(0,1)">▼</button>
@@ -2418,12 +2491,29 @@ function initGameMode() {
     GM.spawnIv = setInterval(() => {
       if (GM.finished) return;
       const head = GM.snake[0];
-      const nx = (head.x + GM.snakeDir.x + 16) % 16;
-      const ny = (head.y + GM.snakeDir.y + 9) % 9;
+      const nx = head.x + GM.snakeDir.x;
+      const ny = head.y + GM.snakeDir.y;
+
+      if (nx < 0 || nx >= 16 || ny < 0 || ny >= 9) {
+        GM.score = Math.max(0, GM.score - 8);
+        GM.snake = [{ x: 4, y: 4 }];
+        GM.snakeDir = { x: 1, y: 0 };
+        updateGmHud();
+        renderSnakeBoard(arena);
+        return;
+      }
+
+      if (nx === GM.hazard.x && ny === GM.hazard.y) {
+        GM.score = Math.max(0, GM.score - 10);
+        GM.hazard = { x: Math.floor(Math.random() * 14) + 1, y: Math.floor(Math.random() * 7) + 1 };
+        updateGmHud();
+      }
+
       GM.snake.unshift({ x: nx, y: ny });
       if (nx === GM.food.x && ny === GM.food.y) {
         GM.score += 10;
         GM.food = { x: Math.floor(Math.random() * 15), y: Math.floor(Math.random() * 8) };
+        GM.hazard = { x: Math.floor(Math.random() * 14) + 1, y: Math.floor(Math.random() * 7) + 1 };
         updateGmHud();
         if (GM.score >= GM.cfg.targetVal) {
           triggerGameAdStage();
@@ -2433,7 +2523,7 @@ function initGameMode() {
         GM.snake.pop();
       }
       renderSnakeBoard(arena);
-    }, 260);
+    }, 185);
   }
 
   GM.timerIv = setInterval(() => {
@@ -2445,10 +2535,41 @@ function initGameMode() {
         triggerGameAdStage();
       } else {
         clearGameTimers();
-        notify(`সময় শেষ! টার্গেট ${GM.cfg.targetVal} পূরণ করতে আবার খেলুন`);
+        notify(`সময় শেষ! হার্ড টার্গেট ${GM.cfg.targetVal} পূরণ করতে আবার খেলুন`);
       }
     }
   }, 1000);
+}
+
+function renderMergeBoard(arena) {
+  const targetNum = GM.mergePair[0];
+  const opts = [targetNum, targetNum, targetNum + 4, targetNum - 4].sort(() => Math.random() - 0.5);
+  let btns = opts.map(v => `<button class="open-btn-3d" style="padding:10px 12px;" onclick="handleMergePick(${v}, ${targetNum})">[ ${v} ]</button>`).join("");
+  arena.innerHTML = `
+    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">
+      <div style="font-size:13px;font-weight:800;color:#fbbf24;">মার্জ করুন: [ ${targetNum} ] + [ ${targetNum} ] = ${targetNum * 2} (+${targetNum} স্কোর)</div>
+      <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:0 10px;">${btns}</div>
+      <div class="muted" style="font-size:11px;">ভুল নম্বর চাপলে -8 পয়েন্ট কাটা যাবে</div>
+    </div>
+  `;
+}
+
+function handleMergePick(picked, expected) {
+  if (GM.finished) return;
+  if (picked === expected) {
+    GM.score += expected;
+    GM.mergePair = [expected === 16 ? 24 : (expected === 24 ? 32 : 20), expected === 16 ? 24 : (expected === 24 ? 32 : 20)];
+    updateGmHud();
+    if (GM.score >= GM.cfg.targetVal) {
+      triggerGameAdStage();
+      return;
+    }
+  } else {
+    GM.score = Math.max(0, GM.score - 8);
+    updateGmHud();
+    notify("ভুল টাইল! -8 স্কোর");
+  }
+  renderMergeBoard(document.getElementById("gm-arena"));
 }
 
 function moveCatcher(dx) {
@@ -2457,26 +2578,73 @@ function moveCatcher(dx) {
   if (el) el.style.left = GM.catcherX + "px";
 }
 
-function mergeTile(val) {
-  if (GM.finished) return;
-  GM.score += val;
-  updateGmHud();
-  if (GM.score >= GM.cfg.targetVal) triggerGameAdStage();
-}
-
 function setSnakeDir(x, y) {
   GM.snakeDir = { x, y };
 }
 
 function renderSnakeBoard(arena) {
   let html = `<div style="position:relative;width:100%;height:100%;">`;
-  html += `<div style="position:absolute;left:${GM.food.x * 20 + 6}px;top:${GM.food.y * 22 + 4}px;font-size:16px;">🟢</div>`;
+  html += `<div style="position:absolute;left:${GM.food.x * 20 + 6}px;top:${GM.food.y * 23 + 4}px;font-size:16px;">🟢</div>`;
+  html += `<div style="position:absolute;left:${GM.hazard.x * 20 + 6}px;top:${GM.hazard.y * 23 + 4}px;font-size:16px;">🟥</div>`;
   GM.snake.forEach((seg, idx) => {
-    html += `<div style="position:absolute;left:${seg.x * 20 + 6}px;top:${seg.y * 22 + 4}px;width:16px;height:16px;border-radius:5px;background:${idx === 0 ? "#4ade80" : "#22c55e"};"></div>`;
+    html += `<div style="position:absolute;left:${seg.x * 20 + 6}px;top:${seg.y * 23 + 4}px;width:16px;height:16px;border-radius:5px;background:${idx === 0 ? "#6ee7b7" : "#10b981"};"></div>`;
   });
   html += `</div>`;
   arena.innerHTML = html;
 }
+
+async function launchGameAdWindow() {
+  if (!GM.token) return;
+  GM.adOpenedAtMs = Date.now();
+  await fetch("/api/game/ad-open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+  });
+  if (GM.adUrl) {
+    window.open(GM.adUrl, "_blank", "noopener,noreferrer");
+  }
+}
+
+function relaunchGameAd() {
+  GM.adOpenedAtMs = Date.now();
+  fetch("/api/game/ad-open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: USER, session_token: GM.token })
+  });
+}
+
+document.addEventListener("visibilitychange", async () => {
+  if (!GM.finished || !GM.token) return;
+  if (document.hidden) {
+    GM.leftAdWindow = true;
+    if (!GM.adOpenedAtMs) {
+      GM.adOpenedAtMs = Date.now();
+      await fetch("/api/game/ad-open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: USER, session_token: GM.token })
+      });
+    }
+  } else if (GM.leftAdWindow) {
+    const spentSec = GM.adOpenedAtMs ? (Date.now() - GM.adOpenedAtMs) / 1000 : 0;
+    if (spentSec >= 8) {
+      const cp = await fetch("/api/game/ad-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: USER, session_token: GM.token })
+      }).then(x => x.json());
+      if (cp.ok) {
+        document.getElementById("gm-ad-timer").textContent = "৮–১০s সম্পন্ন ✓ ব্যাক এসেছেন, ক্লেম করুন!";
+        document.getElementById("gm-claim-btn").disabled = false;
+      }
+    } else {
+      const need = Math.max(1, Math.ceil(8 - spentSec));
+      notify(`অ্যাডে আরও ${need} সেকেন্ড থাকুন, তারপর ব্যাক আসলে রিওয়ার্ড পাবেন`);
+    }
+  }
+});
 
 async function triggerGameAdStage() {
   if (GM.finished) return;
@@ -2488,23 +2656,37 @@ async function triggerGameAdStage() {
   const claimBtn = document.getElementById("gm-claim-btn");
   claimBtn.disabled = true;
 
-  let secLeft = 5;
-  document.getElementById("gm-ad-timer").textContent = `Ad Verifying: ${secLeft}s`;
-  const adIv = setInterval(async () => {
-    secLeft -= 1;
-    if (secLeft > 0) {
-      document.getElementById("gm-ad-timer").textContent = `Ad Verifying: ${secLeft}s`;
+  await launchGameAdWindow();
+
+  const waitTarget = 9;
+  const startMs = Date.now();
+  let verifiedSent = false;
+
+  const tickAd = async () => {
+    const elapsed = (Date.now() - startMs) / 1000;
+    const rem = Math.max(0, Math.ceil(waitTarget - elapsed));
+    if (rem > 0) {
+      document.getElementById("gm-ad-timer").textContent = `Wait: ${rem}s (8–10s required)`;
     } else {
-      clearInterval(adIv);
-      await fetch("/api/game/ad-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: USER, session_token: GM.token })
-      });
-      document.getElementById("gm-ad-timer").textContent = "Ad Verified ✓ Ready to Claim!";
+      if (!verifiedSent) {
+        verifiedSent = true;
+        await fetch("/api/game/ad-complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: USER, session_token: GM.token })
+        });
+      }
+      document.getElementById("gm-ad-timer").textContent = "8–10s Complete ✓ Ready to Claim!";
       claimBtn.disabled = false;
+      if (GM.adTimerIv) {
+        clearInterval(GM.adTimerIv);
+        GM.adTimerIv = null;
+      }
     }
-  }, 1000);
+  };
+
+  tickAd();
+  GM.adTimerIv = setInterval(tickAd, 500);
 }
 
 async function claimGameReward() {
@@ -2515,7 +2697,7 @@ async function claimGameReward() {
   }).then(x => x.json());
   if (cl.ok) {
     closeGameModal();
-    notify(`+${cl.pts_earned} PTS earned!`);
+    notify(`+${cl.pts_earned} PTS রিওয়ার্ড সাকসেস!`);
     await loadApp();
   } else {
     notify(cl.error || "Claim failed");
